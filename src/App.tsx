@@ -224,6 +224,12 @@ type GenerationJob = {
   progress: number
   message: string
   error: string
+  errorStage?: string
+  errorCode?: string
+  errorHint?: string
+  retryable?: boolean
+  provider?: string
+  statusCode?: number | null
   retryCount?: number
   qualityStatus?: string
   unitTitle?: string
@@ -390,6 +396,25 @@ type SecurityStatus = {
     storageDriver: string
     dataDir: string
     backupDir: string
+    backup: {
+      configured: boolean
+      backupDir: string
+      backupCount: number
+      latestBackup: {
+        name: string
+        size: number
+        modifiedAt: string
+      } | null
+      latestDrill: {
+        name: string
+        size: number
+        modifiedAt: string
+        ok?: boolean
+        restoredFiles?: number
+        restoredBytes?: number
+        recordCount?: number
+      } | null
+    }
     trustProxy: boolean
     aiConfigured: boolean
     ttsConfigured: boolean
@@ -514,6 +539,20 @@ function formatBytes(bytes?: number) {
   if (!value) return ''
   if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return ''
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(value))
+  } catch {
+    return value
+  }
 }
 
 function delay(ms: number) {
@@ -2976,35 +3015,67 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
         <div className="task-list">
           {jobs.map((job) => (
             <article key={job.id} className="task-card">
-              <div>
-                <span className={`status-pill ${job.status}`}>{jobStatusLabel(job.status)}</span>
-                <h2>{job.unitTitle || job.podcastTitle || job.type}</h2>
-                <p>{job.bookTitle || '阅读材料'} · {job.message || job.status}</p>
+              <div className="task-card-head">
+                <div>
+                  <span className={`status-pill ${job.status}`}>{jobStatusLabel(job.status)}</span>
+                  <h2>{job.unitTitle || job.podcastTitle || jobTypeLabel(job.type)}</h2>
+                  <p>{job.bookTitle || '阅读材料'} · {job.message || job.status}</p>
+                </div>
+                <div className="task-meta">
+                  <span>{jobTypeLabel(job.type)}</span>
+                  {job.provider && <span>{job.provider}</span>}
+                  {job.createdAt && <span>{formatDateTime(job.createdAt)}</span>}
+                  {Number(job.retryCount || 0) > 0 && <span>已重试 {job.retryCount} 次</span>}
+                </div>
               </div>
               <div className="progress-line">
                 <span style={{ width: `${job.progress || 0}%` }} />
               </div>
-              {job.error && <p className="form-error">{job.error}</p>}
+              {(job.errorHint || job.errorStage || job.errorCode) && (
+                <div className={job.status === 'canceled' ? 'task-diagnosis muted' : 'task-diagnosis'}>
+                  <strong>{job.errorStage || '任务诊断'}</strong>
+                  {job.errorHint && <p>{job.errorHint}</p>}
+                  <div className="task-diagnosis-meta">
+                    {job.errorCode && <span>代码：{job.errorCode}</span>}
+                    {job.statusCode && <span>上游状态：{job.statusCode}</span>}
+                    {job.retryable === false && <span>需要先处理配置或材料</span>}
+                  </div>
+                </div>
+              )}
+              {job.error && (
+                <details className="task-error-details">
+                  <summary>查看原始错误</summary>
+                  <p>{job.error}</p>
+                </details>
+              )}
               <div className="unit-actions">
                 {job.status === 'queued' && (
                   <button type="button" disabled={busyId === job.id} onClick={() => act(job, 'pause')}>
+                    <Pause size={16} />
                     暂停
                   </button>
                 )}
                 {job.status === 'paused' && (
                   <button type="button" disabled={busyId === job.id} onClick={() => act(job, 'resume')}>
+                    <Play size={16} />
                     恢复
                   </button>
                 )}
                 {['queued', 'paused', 'running'].includes(job.status) && (
                   <button type="button" disabled={busyId === job.id} onClick={() => act(job, 'cancel')}>
+                    <X size={16} />
                     取消
                   </button>
                 )}
                 {['failed', 'canceled', 'succeeded'].includes(job.status) && (
-                  <button type="button" disabled={busyId === job.id} onClick={() => act(job, 'retry')}>
+                  <button
+                    type="button"
+                    disabled={busyId === job.id || (job.status === 'failed' && job.retryable === false)}
+                    title={job.retryable === false ? '需要先处理配置或材料后再重试' : undefined}
+                    onClick={() => act(job, 'retry')}
+                  >
                     {busyId === job.id ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
-                    重试
+                    {job.status === 'succeeded' ? '重新生成' : job.retryable === false ? '需先处理' : '重试任务'}
                   </button>
                 )}
               </div>
@@ -3026,6 +3097,14 @@ function jobStatusLabel(status: string) {
     succeeded: '完成',
   }
   return labels[status] || status
+}
+
+function jobTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    'generate-unit': '分级阅读',
+    'generate-podcast': '播客',
+  }
+  return labels[type] || type
 }
 
 function VocabularyView({
@@ -3348,6 +3427,26 @@ function SettingsView({
             />
             <StatusItem label="会话" ok value={`${security.security.sessionDays} 天`} />
             <StatusItem label="任务" ok value={`${security.deployment.activeJobs} 个运行中`} />
+            <StatusItem
+              label="最近备份"
+              ok={Boolean(security.deployment.backup.latestBackup)}
+              value={
+                security.deployment.backup.latestBackup
+                  ? `${formatDateTime(security.deployment.backup.latestBackup.modifiedAt)} · ${formatBytes(security.deployment.backup.latestBackup.size)}`
+                  : '未检测到'
+              }
+            />
+            <StatusItem
+              label="恢复演练"
+              ok={Boolean(security.deployment.backup.latestDrill?.ok)}
+              value={
+                security.deployment.backup.latestDrill
+                  ? security.deployment.backup.latestDrill.ok
+                    ? `${formatDateTime(security.deployment.backup.latestDrill.modifiedAt)} · ${security.deployment.backup.latestDrill.recordCount || 0} 条`
+                    : '最近失败'
+                  : '未执行'
+              }
+            />
           </div>
         </article>
       )}

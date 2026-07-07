@@ -145,11 +145,11 @@ docker compose cp app:/app/backups/linguashelf.zip ./linguashelf.zip
 
 建议把备份文件再同步到云盘、对象存储，或下载到自己的电脑。
 
-服务器每日自动备份：
+服务器每日自动备份。脚本默认会在备份完成后做一次非破坏性恢复演练：把刚生成的备份恢复到临时 `DATA_DIR`，并写出 `*.drill.json` 报告，不会覆盖生产数据。
 
 ```bash
 mkdir -p /opt/linguashelf-backups
-bash /opt/linguashelf/deploy/backup-daily.sh
+APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 bash /opt/linguashelf/deploy/backup-daily.sh
 ```
 
 确认手动执行成功后，加入 `cron`：
@@ -161,8 +161,10 @@ crontab -e
 追加一行，每天凌晨 3:20 备份，并默认保留 14 天：
 
 ```cron
-20 3 * * * APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 bash /opt/linguashelf/deploy/backup-daily.sh >> /var/log/linguashelf-backup.log 2>&1
+20 3 * * * APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 bash /opt/linguashelf/deploy/backup-daily.sh >> /var/log/linguashelf-backup.log 2>&1
 ```
+
+如果只想备份、不做恢复演练，把 `RUN_RESTORE_DRILL=1` 改成 `RUN_RESTORE_DRILL=0`。
 
 从服务器下载最近的备份到本机：
 
@@ -187,6 +189,14 @@ docker compose up -d
 ```
 
 恢复脚本会先把当前数据目录改名保留，再解压备份。
+
+只验证某个备份是否可恢复，不覆盖生产数据：
+
+```bash
+docker compose cp ./linguashelf.zip app:/app/backups/drill.zip
+docker compose exec -T -e DATA_DIR=/tmp/linguashelf-restore-drill app sh -lc "rm -rf /tmp/linguashelf-restore-drill* && npm run backup:drill -- /app/backups/drill.zip /app/backups/manual-drill.json"
+docker compose cp app:/app/backups/manual-drill.json ./manual-drill.json
+```
 
 ## 7. 非 Docker 部署
 

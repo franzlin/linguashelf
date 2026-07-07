@@ -587,6 +587,83 @@ p {
   gap: 12px;
 }
 
+.task-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.task-card-head h2 {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.task-meta,
+.task-diagnosis-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.task-meta {
+  justify-content: flex-end;
+  align-content: flex-start;
+  min-width: min(260px, 38%);
+}
+
+.task-meta span,
+.task-diagnosis-meta span {
+  width: max-content;
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 0.78rem;
+  font-weight: 680;
+}
+
+.task-diagnosis {
+  padding: 12px;
+  border: 1px solid var(--danger-2);
+  border-radius: 8px;
+  background: #fff7f4;
+  display: grid;
+  gap: 6px;
+}
+
+.task-diagnosis.muted {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+.task-diagnosis strong {
+  color: var(--ink);
+}
+
+.task-diagnosis p {
+  color: var(--ink);
+}
+
+.task-error-details {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.task-error-details summary {
+  color: var(--muted);
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.task-error-details p {
+  margin-top: 8px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
 .calendar-strip {
   display: grid;
   grid-template-columns: repeat(14, 1fr);
@@ -1794,6 +1871,15 @@ p {
   .dashboard-hero {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .task-card-head {
+    flex-direction: column;
+  }
+
+  .task-meta {
+    justify-content: flex-start;
+    min-width: 0;
   }
 
   .dashboard-grid {

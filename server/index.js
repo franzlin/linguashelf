@@ -18,6 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
 const execFileAsync = promisify(execFile)
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, 'data')
+const backupDir = process.env.BACKUP_DIR ? path.resolve(process.env.BACKUP_DIR) : path.join(root, 'backups')
 const uploadDir = path.join(dataDir, 'uploads')
 const audioDir = path.join(dataDir, 'audio')
 const dbPath = path.join(dataDir, 'db.json')
@@ -3091,8 +3092,179 @@ function applyGeneratedContent(unit, content, options = {}) {
   }
 }
 
+function clearJobDiagnosis(job) {
+  delete job.errorStage
+  delete job.errorCode
+  delete job.errorHint
+  delete job.retryable
+  delete job.provider
+  delete job.statusCode
+  delete job.diagnosedAt
+}
+
+function parseStatusCode(message) {
+  const match = String(message || '').match(/\b([45]\d{2})\b/)
+  return match ? Number(match[1]) : null
+}
+
+function stageLabel(stage, job) {
+  const normalized = String(stage || '').toLowerCase()
+  if (normalized === 'unit-generation') return '学习单元生成'
+  if (normalized === 'podcast-script') return '播客脚本生成'
+  if (normalized === 'podcast-audio') return '播客音频合成'
+  if (normalized === 'podcast-setup') return '播客任务准备'
+  if (normalized === 'quality-review') return '生成质量检查'
+  if (normalized === 'cancel') return '用户操作'
+  if (normalized === 'setup') return '任务准备'
+  if (job?.type === 'generate-podcast') return '播客生成'
+  return '学习单元生成'
+}
+
+function providerLabel(stage, message) {
+  const text = String(message || '').toLowerCase()
+  const normalized = String(stage || '').toLowerCase()
+  if (normalized === 'podcast-audio' || /gemini|tts|语音|音频|mimo/.test(text)) return 'TTS 服务'
+  if (/ocr|tesseract|视觉/.test(text)) return /tesseract/.test(text) ? '本地 Tesseract OCR' : 'Hunyuan OCR'
+  if (/ai|openai|gpt|模型|脚本|审稿/.test(text) || normalized.includes('script') || normalized.includes('generation')) return 'AI 文本服务'
+  return ''
+}
+
+function diagnoseJobError(job, errorOrMessage, options = {}) {
+  const message = typeof errorOrMessage === 'string' ? errorOrMessage : errorOrMessage?.message || String(errorOrMessage || '')
+  const text = message.toLowerCase()
+  const statusCode = options.statusCode || parseStatusCode(message)
+  let errorCode = options.errorCode || 'unknown'
+  let errorHint = '可以稍后重试；如果连续失败，请减少批量数量，或检查对应的 AI/OCR/TTS 配置。'
+  let retryable = true
+
+  if (options.stage === 'cancel' || /任务已取消|cancel/.test(text)) {
+    errorCode = 'canceled'
+    errorHint = '任务是手动取消的；需要继续时可以重新加入队列。'
+    retryable = true
+  } else if (options.stage === 'setup' || options.stage === 'podcast-setup' || /不存在|未找到/.test(message)) {
+    errorCode = 'missing-resource'
+    errorHint = '任务关联的书籍、单元或播客已经不存在。请回到书库重新创建任务。'
+    retryable = false
+  } else if (statusCode === 429 || /rate limit|quota|too many|频繁|限流|额度/.test(text)) {
+    errorCode = 'rate-limit'
+    errorHint = '外部服务正在限流或额度不足。等待几分钟后重试，或降低批量生成数量。'
+    retryable = true
+  } else if ([401, 403].includes(statusCode) || /api key|unauthorized|forbidden|鉴权|密钥|未配置|invalid key/.test(text)) {
+    errorCode = 'provider-auth'
+    errorHint = '外部服务密钥或模型配置不可用。需要先检查服务器环境变量，再重试任务。'
+    retryable = false
+  } else if ([408, 500, 502, 503, 504].includes(statusCode) || /timeout|timed out|econnreset|enotfound|fetch failed|network|暂时|上游/.test(text)) {
+    errorCode = 'upstream-temporary'
+    errorHint = '上游服务或网络临时不稳定。稍后点击重试通常可以恢复。'
+    retryable = true
+  } else if (/ocr|tesseract|视觉/.test(text)) {
+    errorCode = 'ocr-failed'
+    errorHint = 'OCR 没有得到足够正文。请确认 PDF 清晰、方向正确，或换用非扫描版文件。'
+    retryable = false
+  } else if (/质量|忠实度|review|source|keyword/.test(text)) {
+    errorCode = 'quality-review'
+    errorHint = '质量检查认为结果不够稳定。可以点击重试，系统会重新生成一版。'
+    retryable = true
+  } else if (statusCode && statusCode >= 400 && statusCode < 500) {
+    errorCode = 'bad-request'
+    errorHint = '上游服务拒绝了这次请求。若重试仍失败，请降低难度或减少本次材料长度。'
+    retryable = false
+  }
+
+  return {
+    errorStage: stageLabel(options.stage, job),
+    errorCode,
+    errorHint,
+    retryable,
+    provider: options.provider || providerLabel(options.stage, message),
+    statusCode,
+  }
+}
+
+function applyJobDiagnosis(job, errorOrMessage, options = {}) {
+  Object.assign(job, diagnoseJobError(job, errorOrMessage, options), {
+    diagnosedAt: new Date().toISOString(),
+  })
+}
+
+function markJobCanceled(job, message = '任务已取消') {
+  job.status = 'canceled'
+  job.progress = 100
+  job.error = ''
+  job.message = message
+  job.finishedAt = new Date().toISOString()
+  job.updatedAt = job.finishedAt
+  applyJobDiagnosis(job, message, { stage: 'cancel' })
+}
+
+function markJobFailed(job, errorOrMessage, options = {}) {
+  const message = typeof errorOrMessage === 'string' ? errorOrMessage : errorOrMessage?.message || String(errorOrMessage || '')
+  job.status = 'failed'
+  job.progress = 100
+  job.error = message || '任务失败'
+  job.message = options.message || '生成失败'
+  job.finishedAt = new Date().toISOString()
+  job.updatedAt = job.finishedAt
+  applyJobDiagnosis(job, job.error, options)
+}
+
+async function computeBackupStatus() {
+  try {
+    const entries = await fs.readdir(backupDir, { withFileTypes: true })
+    const files = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile())
+        .map(async (entry) => {
+          const fullPath = path.join(backupDir, entry.name)
+          const stat = await fs.stat(fullPath)
+          return { name: entry.name, size: stat.size, mtimeMs: stat.mtimeMs, modifiedAt: stat.mtime.toISOString() }
+        })
+    )
+    const backups = files
+      .filter((file) => /^linguashelf-.*\.zip$/.test(file.name))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const drills = files
+      .filter((file) => /^linguashelf-.*\.drill\.json$/.test(file.name))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    let latestDrill = drills[0] || null
+    if (latestDrill) {
+      try {
+        const report = JSON.parse(await fs.readFile(path.join(backupDir, latestDrill.name), 'utf8'))
+        latestDrill = {
+          ...latestDrill,
+          ok: Boolean(report.ok),
+          restoredFiles: Number(report.restoredFiles || 0),
+          restoredBytes: Number(report.restoredBytes || 0),
+          recordCount: Number(report.recordCount || 0),
+        }
+      } catch {
+        latestDrill = { ...latestDrill, ok: false }
+      }
+    }
+    return {
+      configured: true,
+      backupDir,
+      backupCount: backups.length,
+      latestBackup: backups[0] || null,
+      latestDrill,
+    }
+  } catch {
+    return {
+      configured: false,
+      backupDir,
+      backupCount: 0,
+      latestBackup: null,
+      latestDrill: null,
+    }
+  }
+}
+
 function publicJob(job) {
   if (!job) return null
+  const fallbackDiagnosis =
+    !job.errorHint && ['failed', 'canceled'].includes(job.status) && (job.error || job.message)
+      ? diagnoseJobError(job, job.error || job.message, { stage: job.status === 'canceled' ? 'cancel' : '' })
+      : null
   return {
     id: job.id,
     type: job.type,
@@ -3103,6 +3275,12 @@ function publicJob(job) {
     progress: job.progress || 0,
     message: job.message || '',
     error: job.error || '',
+    errorStage: job.errorStage || fallbackDiagnosis?.errorStage || '',
+    errorCode: job.errorCode || fallbackDiagnosis?.errorCode || '',
+    errorHint: job.errorHint || fallbackDiagnosis?.errorHint || '',
+    retryable: job.retryable === undefined ? fallbackDiagnosis?.retryable !== false : job.retryable !== false,
+    provider: job.provider || fallbackDiagnosis?.provider || '',
+    statusCode: job.statusCode || fallbackDiagnosis?.statusCode || null,
     retryCount: Number(job.retryCount || 0),
     qualityStatus: job.qualityStatus || '',
     createdAt: job.createdAt,
@@ -3250,20 +3428,19 @@ async function updatePodcastJobProgress(podcastId, jobId, progress, message) {
   await writeDb(db)
 }
 
-async function failPodcastJob(jobId, message) {
+async function failPodcastJob(jobId, message, options = {}) {
   const db = await readDb()
   const job = db.jobs.find((item) => item.id === jobId)
   if (!job) return
   const podcast = db.podcasts.find((item) => item.id === job.podcastId)
-  job.status = 'failed'
-  job.progress = 100
-  job.error = message || '播客生成失败'
-  job.message = '播客生成失败'
-  job.finishedAt = new Date().toISOString()
-  job.updatedAt = job.finishedAt
+  if (options.status === 'canceled') {
+    markJobCanceled(job, message || '任务已取消')
+  } else {
+    markJobFailed(job, message || '播客生成失败', { ...options, message: '播客生成失败' })
+  }
   if (podcast) {
     podcast.status = 'failed'
-    podcast.error = job.error
+    podcast.error = job.error || job.message
     podcast.updatedAt = job.updatedAt
   }
   await writeDb(db)
@@ -3276,7 +3453,7 @@ async function processPodcastJob(jobId) {
   const user = job ? db.users.find((item) => item.id === job.userId) : null
   if (!job) return
   if (!podcast || !user) {
-    await failPodcastJob(job.id, '播客或用户不存在')
+    await failPodcastJob(job.id, '播客或用户不存在', { stage: 'podcast-setup' })
     return
   }
 
@@ -3293,7 +3470,7 @@ async function processPodcastJob(jobId) {
   try {
     scriptResult = await generatePodcastScript(podcast.sourceText, podcast.lexile || podcastLexileDefault, podcast.index || 1, normalizePodcastKind(podcast.kind))
   } catch (error) {
-    await failPodcastJob(job.id, error.message || '播客脚本生成失败')
+    await failPodcastJob(job.id, error.message || '播客脚本生成失败', { stage: 'podcast-script' })
     return
   }
 
@@ -3302,7 +3479,7 @@ async function processPodcastJob(jobId) {
   podcast = job ? db.podcasts.find((item) => item.id === job.podcastId) : null
   if (!job || !podcast) return
   if (job.cancelRequested) {
-    await failPodcastJob(job.id, '任务已取消')
+    await failPodcastJob(job.id, '任务已取消', { stage: 'cancel', status: 'canceled' })
     return
   }
 
@@ -3324,7 +3501,7 @@ async function processPodcastJob(jobId) {
       await updatePodcastJobProgress(podcast.id, job.id, progress, `正在合成音频 ${done}/${total}`)
     })
   } catch (error) {
-    await failPodcastJob(job.id, error.message || '播客音频合成失败')
+    await failPodcastJob(job.id, error.message || '播客音频合成失败', { stage: 'podcast-audio' })
     return
   }
 
@@ -3341,6 +3518,7 @@ async function processPodcastJob(jobId) {
   job.message = '播客已生成'
   job.finishedAt = podcast.updatedAt
   job.updatedAt = podcast.updatedAt
+  clearJobDiagnosis(job)
   await writeDb(db)
 }
 
@@ -3361,10 +3539,7 @@ async function processJobQueue() {
       let unit = db.units.find((item) => item.id === job.unitId)
       const user = db.users.find((item) => item.id === job.userId)
       if (!unit || !user) {
-        job.status = 'failed'
-        job.error = '学习单元或用户不存在'
-        job.finishedAt = new Date().toISOString()
-        job.updatedAt = job.finishedAt
+        markJobFailed(job, '学习单元或用户不存在', { stage: 'setup' })
         await writeDb(db)
         continue
       }
@@ -3402,11 +3577,7 @@ async function processJobQueue() {
       if (!job || !unit) continue
 
       if (job.cancelRequested) {
-        job.status = 'canceled'
-        job.progress = 100
-        job.message = '任务已取消'
-        job.finishedAt = new Date().toISOString()
-        job.updatedAt = job.finishedAt
+        markJobCanceled(job)
         unit.generation = {
           ...(unit.generation || {}),
           jobId: job.id,
@@ -3420,12 +3591,7 @@ async function processJobQueue() {
       }
 
       if (failure || !content) {
-        job.status = 'failed'
-        job.progress = 100
-        job.error = failure || 'AI 未返回学习单元'
-        job.message = '生成失败'
-        job.finishedAt = new Date().toISOString()
-        job.updatedAt = job.finishedAt
+        markJobFailed(job, failure || 'AI 未返回学习单元', { stage: 'unit-generation' })
         unit.generation = {
           ...(unit.generation || {}),
           jobId: job.id,
@@ -3468,6 +3634,7 @@ async function processJobQueue() {
       job.qualityStatus = unit.quality?.status || ''
       job.finishedAt = new Date().toISOString()
       job.updatedAt = job.finishedAt
+      clearJobDiagnosis(job)
       unit.generation = {
         ...(unit.generation || {}),
         jobId: job.id,
@@ -3638,6 +3805,7 @@ async function createApp() {
   app.get('/api/security/status', auth, async (req, res) => {
     const db = req.db
     const activeJobs = db.jobs.filter((job) => job.userId === req.user.id && ['queued', 'running'].includes(job.status)).length
+    const backup = await computeBackupStatus()
     res.json({
       security: {
         allowSignup,
@@ -3650,7 +3818,8 @@ async function createApp() {
         nodeEnv: process.env.NODE_ENV || 'development',
         storageDriver,
         dataDir,
-        backupDir: process.env.BACKUP_DIR || path.join(root, 'backups'),
+        backupDir,
+        backup,
         trustProxy: Boolean(process.env.TRUST_PROXY),
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         ttsConfigured: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
@@ -3977,12 +4146,8 @@ async function createApp() {
     }
     const active = activePodcastJob(db, req.user.id, podcast.id)
     if (active && ['queued', 'running', 'paused'].includes(active.status)) {
-      active.status = 'canceled'
       active.cancelRequested = true
-      active.progress = 100
-      active.message = '任务已取消'
-      active.finishedAt = new Date().toISOString()
-      active.updatedAt = active.finishedAt
+      markJobCanceled(active)
     }
     await deletePodcastAudioFiles(podcast)
     db.podcasts = db.podcasts.filter((item) => item.id !== podcast.id)
@@ -4192,15 +4357,11 @@ async function createApp() {
       job.updatedAt = now
       setTimeout(processJobQueue, 0)
     } else if (action === 'cancel' && ['queued', 'paused'].includes(job.status)) {
-      job.status = 'canceled'
-      job.progress = 100
-      job.message = '任务已取消'
-      job.finishedAt = now
-      job.updatedAt = now
+      markJobCanceled(job)
       if (podcast) {
         podcast.status = 'failed'
-        podcast.error = '任务已取消'
-        podcast.updatedAt = now
+        podcast.error = job.message
+        podcast.updatedAt = job.updatedAt
       }
     } else if (action === 'cancel' && job.status === 'running') {
       job.cancelRequested = true
@@ -4212,6 +4373,7 @@ async function createApp() {
       job.status = 'queued'
       job.progress = 0
       job.error = ''
+      clearJobDiagnosis(job)
       job.cancelRequested = false
       job.retryCount = Number(job.retryCount || 0) + 1
       job.message = '已重新加入队列'

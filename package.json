@@ -11,6 +11,7 @@
     "smoke": "node scripts/smoke.mjs",
     "predeploy": "node scripts/predeploy-check.mjs",
     "backup": "node scripts/backup.mjs",
+    "backup:drill": "node scripts/backup-drill.mjs",
     "restore": "node scripts/restore.mjs"
   },
   "devDependencies": {
