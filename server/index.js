@@ -2252,7 +2252,9 @@ function computeHome(db, userId) {
 }
 
 function computeStats(db, userId) {
-  const reports = db.reports.filter((item) => item.userId === userId)
+  const reports = db.reports
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
   const vocabulary = db.vocabulary.filter((item) => item.userId === userId)
   const settings = userSettings(db, userId)
   const now = Date.now()
@@ -2263,6 +2265,7 @@ function computeStats(db, userId) {
     : 0
   const dueVocabulary = vocabulary.filter((item) => !item.dueAt || Date.parse(item.dueAt) <= now).length
   const masteredVocabulary = vocabulary.filter((item) => Number(item.mastery || 0) >= 4).length
+  const readingMinutes = reports.reduce((total, report) => total + reportStudyMinutes(report, settings), 0)
   const recentReports = reports
     .filter((report) => Date.parse(report.createdAt) >= now - 14 * 24 * 60 * 60 * 1000)
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
@@ -2275,18 +2278,25 @@ function computeStats(db, userId) {
   for (const report of reports) {
     const date = String(report.createdAt || '').slice(0, 10)
     if (!date) continue
-    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0 }
+    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0, minutes: 0 }
     item.units += 1
     item.words += Number(report.newVocabularyCount || 0)
     item.correctRate += Number(report.correctRate || 0)
+    item.minutes += reportStudyMinutes(report, settings)
     dailyMap.set(date, item)
   }
-  const calendar = []
-  for (let index = 13; index >= 0; index -= 1) {
-    const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0 }
-    calendar.push({ ...item, correctRate: item.units ? item.correctRate / item.units : 0 })
-  }
+  const calendar = buildDailySeries(dailyMap, now, 14)
+  const activity = buildDailySeries(dailyMap, now, 30)
+  const vocabularyGrowth = computeVocabularyGrowth(vocabulary, reports, now)
+  const difficultyTrend = buildDifficultyTrend(reports, settings)
+  const lastDifficulty = difficultyTrend[difficultyTrend.length - 1]
+  const previousDifficulty = difficultyTrend.length > 1 ? difficultyTrend[difficultyTrend.length - 2] : null
+  const readingDelta = previousDifficulty ? levelIndex(readingLevels, lastDifficulty.readingLevel) - levelIndex(readingLevels, previousDifficulty.readingLevel) : 0
+  const listeningDelta = previousDifficulty
+    ? levelIndex(listeningLevels, lastDifficulty.listeningLevel) - levelIndex(listeningLevels, previousDifficulty.listeningLevel)
+    : 0
+  const weeklyReadingMinutes = activity.slice(-7).reduce((total, item) => total + Number(item.minutes || 0), 0)
+
   let streakDays = 0
   for (let index = 0; index < 365; index += 1) {
     const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
@@ -2305,7 +2315,103 @@ function computeStats(db, userId) {
     dailyGoalUnits: Math.max(1, Math.round(Number(settings.studyMinutes || 10) / 10)),
     streakDays,
     calendar,
+    readingMinutes,
+    todayReadingMinutes: dailyMap.get(today)?.minutes || 0,
+    weeklyReadingMinutes,
+    activity,
+    vocabularyGrowth,
+    difficultyTrend,
+    difficultySummary: {
+      readingLevel: lastDifficulty?.readingLevel || settings.readingLevel,
+      listeningLevel: lastDifficulty?.listeningLevel || settings.listeningLevel,
+      readingDelta,
+      listeningDelta,
+      message: difficultyTrend.length
+        ? difficultySummaryMessage(readingDelta, listeningDelta)
+        : '完成单元后会开始记录难度变化。',
+    },
   }
+}
+
+function reportStudyMinutes(report, settings) {
+  return Math.max(1, Math.round(Number(report.studyMinutes || settings.studyMinutes || 10)))
+}
+
+function buildDailySeries(dailyMap, now, days) {
+  const items = []
+  for (let index = days - 1; index >= 0; index -= 1) {
+    const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0, minutes: 0 }
+    items.push({ ...item, correctRate: item.units ? item.correctRate / item.units : 0 })
+  }
+  return items
+}
+
+function computeVocabularyGrowth(vocabulary, reports, now) {
+  const weekAgo = now - 7 * 24 * 60 * 60 * 1000
+  const monthAgo = now - 30 * 24 * 60 * 60 * 1000
+  const windowStart = now - 29 * 24 * 60 * 60 * 1000
+  const dailyAdds = new Map()
+  for (const item of vocabulary) {
+    const createdAt = Date.parse(item.createdAt || item.lastSeenAt || '')
+    if (!createdAt) continue
+    const date = new Date(createdAt).toISOString().slice(0, 10)
+    dailyAdds.set(date, (dailyAdds.get(date) || 0) + 1)
+  }
+  let runningTotal = vocabulary.filter((item) => {
+    const createdAt = Date.parse(item.createdAt || item.lastSeenAt || '')
+    return createdAt && createdAt < windowStart
+  }).length
+  const daily = []
+  for (let index = 29; index >= 0; index -= 1) {
+    const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    const added = dailyAdds.get(date) || 0
+    runningTotal += added
+    daily.push({ date, added, total: runningTotal })
+  }
+  const addedThisWeek = vocabulary.filter((item) => Date.parse(item.createdAt || item.lastSeenAt || '') >= weekAgo).length
+  const addedThisMonth = vocabulary.filter((item) => Date.parse(item.createdAt || item.lastSeenAt || '') >= monthAgo).length
+  return {
+    total: vocabulary.length,
+    addedThisWeek,
+    addedThisMonth,
+    averagePerUnit: reports.length ? vocabulary.length / reports.length : 0,
+    daily,
+  }
+}
+
+function buildDifficultyTrend(reports, settings) {
+  return reports.slice(-16).map((report) => {
+    const readingLevel =
+      report.readingLevel ||
+      report.levelAdjustment?.from?.readingLevel ||
+      report.levelAdjustment?.readingLevel ||
+      settings.readingLevel
+    const listeningLevel =
+      report.listeningLevel ||
+      report.levelAdjustment?.from?.listeningLevel ||
+      report.levelAdjustment?.listeningLevel ||
+      settings.listeningLevel
+    return {
+      date: String(report.createdAt || '').slice(0, 10),
+      unitTitle: report.unitTitle,
+      readingLevel: normalizeLevel(readingLevels, readingLevel, settings.readingLevel),
+      listeningLevel: normalizeLevel(listeningLevels, listeningLevel, settings.listeningLevel),
+      correctRate: Number(report.correctRate || 0),
+      newVocabularyCount: Number(report.newVocabularyCount || 0),
+    }
+  })
+}
+
+function levelIndex(levels, level) {
+  const index = levels.indexOf(level)
+  return index === -1 ? 0 : index
+}
+
+function difficultySummaryMessage(readingDelta, listeningDelta) {
+  if (readingDelta > 0 || listeningDelta > 0) return '最近难度有上调，继续观察正确率和生词负担。'
+  if (readingDelta < 0 || listeningDelta < 0) return '最近难度有下调，先把理解稳定下来。'
+  return '最近难度保持稳定。'
 }
 
 function makeSourceRefs(unit) {
@@ -4010,6 +4116,7 @@ async function createApp() {
       }
     }
 
+    const currentSettings = userSettings(db, req.user.id)
     const report = {
       id: nanoid(),
       userId: req.user.id,
@@ -4022,7 +4129,10 @@ async function createApp() {
       correctRate,
       newVocabularyCount: vocabTerms.size,
       wrongQuestions,
-      suggestion: adaptiveSuggestion({ correctRate, newVocabularyCount: vocabTerms.size }, userSettings(db, req.user.id)),
+      readingLevel: currentSettings.readingLevel,
+      listeningLevel: currentSettings.listeningLevel,
+      studyMinutes: Math.max(1, Math.round(Number(currentSettings.studyMinutes || 10))),
+      suggestion: adaptiveSuggestion({ correctRate, newVocabularyCount: vocabTerms.size }, currentSettings),
       createdAt: new Date().toISOString(),
     }
     unit.status = 'completed'

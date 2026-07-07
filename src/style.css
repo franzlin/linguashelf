@@ -690,6 +690,210 @@ p {
   font-size: 1.3rem;
 }
 
+.dashboard-page {
+  display: grid;
+  gap: 18px;
+}
+
+.dashboard-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.dashboard-hero h1 {
+  margin-top: 6px;
+}
+
+.dashboard-kpis {
+  margin-bottom: 0;
+}
+
+.metric-card {
+  min-height: 132px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.metric-card span,
+.metric-card small {
+  color: var(--muted);
+}
+
+.metric-card strong {
+  font-size: 1.35rem;
+}
+
+.metric-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--green);
+  background: var(--green-2);
+  display: grid;
+  place-items: center;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.dashboard-panel {
+  box-shadow: none;
+  min-width: 0;
+}
+
+.dashboard-panel .section-head strong {
+  color: var(--ink);
+}
+
+.wide-panel {
+  grid-column: 1 / -1;
+}
+
+.bar-chart {
+  height: 138px;
+  display: grid;
+  align-items: end;
+  gap: 6px;
+}
+
+.activity-chart,
+.vocab-chart {
+  grid-template-columns: repeat(30, minmax(7px, 1fr));
+}
+
+.bar-chart div {
+  min-width: 0;
+  height: 116px;
+  display: grid;
+  align-items: end;
+  justify-items: center;
+  gap: 4px;
+}
+
+.bar-chart span {
+  width: 100%;
+  max-width: 18px;
+  min-height: 5px;
+  border-radius: 6px 6px 2px 2px;
+  background: var(--green);
+}
+
+.vocab-chart span {
+  background: var(--rust);
+}
+
+.bar-chart small {
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.dashboard-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--green);
+  background: var(--green-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 760;
+}
+
+.difficulty-trend {
+  min-height: 210px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.difficulty-step {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfb;
+  display: grid;
+  gap: 8px;
+}
+
+.difficulty-date,
+.difficulty-step small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.difficulty-rails {
+  position: relative;
+  height: 96px;
+  border-radius: 8px;
+  background: linear-gradient(to top, #eef3f0, #ffffff);
+  border: 1px solid var(--line);
+}
+
+.difficulty-rails::before {
+  content: "";
+  position: absolute;
+  inset: 10px 50% 10px auto;
+  width: 1px;
+  background: var(--line);
+}
+
+.difficulty-rails span {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  transform: translateY(50%);
+}
+
+.reading-dot {
+  left: 32%;
+  background: var(--green);
+}
+
+.listening-dot {
+  right: 32%;
+  background: var(--blue);
+}
+
+.difficulty-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.small-empty {
+  min-height: 138px;
+  border: 1px dashed #bac9c1;
+  border-radius: 8px;
+  background: #fbfcfb;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.small-empty svg {
+  color: var(--green);
+}
+
 .unit-list {
   display: grid;
   gap: 10px;
@@ -1429,9 +1633,10 @@ p {
     background: #ffffff;
     box-shadow: var(--shadow);
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, minmax(62px, 1fr));
     gap: 4px;
     padding: 6px;
+    overflow-x: auto;
   }
 
   .mobile-nav button {
@@ -1518,6 +1723,28 @@ p {
 
   .home-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-hero {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-chart,
+  .vocab-chart {
+    grid-template-columns: repeat(30, 12px);
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .difficulty-trend {
+    grid-template-columns: repeat(16, minmax(96px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 4px;
   }
 
   .assist-panel {

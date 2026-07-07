@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import {
+  Activity,
   ArrowLeft,
   BarChart3,
   BookMarked,
@@ -8,8 +9,10 @@ import {
   Brain,
   Check,
   ChevronDown,
+  Clock,
   Download,
   FileText,
+  Flame,
   Headphones,
   Home,
   ListChecks,
@@ -20,6 +23,7 @@ import {
   Play,
   RotateCcw,
   Settings,
+  TrendingUp,
   Trash2,
   Upload,
   User,
@@ -27,7 +31,7 @@ import {
   X,
 } from 'lucide-react'
 
-type View = 'home' | 'library' | 'book' | 'study' | 'reports' | 'vocabulary' | 'tasks' | 'settings'
+type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'settings'
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
 type UserProfile = {
@@ -280,6 +284,9 @@ type Report = {
     listening: string
     action: string
   }
+  readingLevel?: string
+  listeningLevel?: string
+  studyMinutes?: number
   levelAdjustment?: {
     applied: boolean
     readingLevel: string
@@ -316,6 +323,9 @@ type AppData = {
     vocabularyCount: number
     dueVocabulary: number
     masteredVocabulary: number
+    readingMinutes: number
+    todayReadingMinutes: number
+    weeklyReadingMinutes: number
     recentReports: Array<{
       date: string
       correctRate: number
@@ -329,7 +339,41 @@ type AppData = {
       units: number
       words: number
       correctRate: number
+      minutes: number
     }>
+    activity: Array<{
+      date: string
+      units: number
+      words: number
+      correctRate: number
+      minutes: number
+    }>
+    vocabularyGrowth: {
+      total: number
+      addedThisWeek: number
+      addedThisMonth: number
+      averagePerUnit: number
+      daily: Array<{
+        date: string
+        added: number
+        total: number
+      }>
+    }
+    difficultyTrend: Array<{
+      date: string
+      unitTitle: string
+      readingLevel: string
+      listeningLevel: string
+      correctRate: number
+      newVocabularyCount: number
+    }>
+    difficultySummary: {
+      readingLevel: string
+      listeningLevel: string
+      readingDelta: number
+      listeningDelta: number
+      message: string
+    }
   }
 }
 
@@ -432,6 +476,22 @@ function formatPercent(value: number) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
+}
+
+function formatDecimal(value: number) {
+  return Number(value || 0).toFixed(1)
+}
+
+function shortDate(value: string) {
+  if (!value) return ''
+  const [, month, day] = value.split('-')
+  return month && day ? `${Number(month)}/${Number(day)}` : value
+}
+
+function levelPercent(options: string[], value: string) {
+  const index = Math.max(0, options.indexOf(value))
+  if (options.length <= 1) return 0
+  return Math.round((index / (options.length - 1)) * 100)
 }
 
 function formatDuration(seconds: number) {
@@ -747,6 +807,13 @@ export function App() {
           />
         )}
 
+        {view === 'dashboard' && (
+          <DashboardView
+            data={data}
+            onNavigate={setView}
+          />
+        )}
+
         {view === 'book' && selectedBook && (
           <BookView
             book={selectedBook}
@@ -995,6 +1062,125 @@ function HomeView({
   )
 }
 
+function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view: View) => void }) {
+  const stats = data.stats
+  const activity = stats.activity || []
+  const vocabularyDaily = stats.vocabularyGrowth?.daily || []
+  const difficultyTrend = stats.difficultyTrend || []
+  const maxActivityMinutes = Math.max(1, ...activity.map((item) => Number(item.minutes || 0)))
+  const maxVocabularyAdded = Math.max(1, ...vocabularyDaily.map((item) => Number(item.added || 0)))
+
+  return (
+    <section className="dashboard-page">
+      <div className="page-section dashboard-hero">
+        <div>
+          <span className="eyebrow">学习数据</span>
+          <h1>你的英语学习仪表盘</h1>
+          <p>按完成单元估算阅读时长，结合生词和难度变化观察学习负担。</p>
+        </div>
+        <button className="ghost-button" type="button" onClick={() => onNavigate('reports')}>
+          <BarChart3 size={17} />
+          查看报告
+        </button>
+      </div>
+
+      <div className="stat-row dashboard-kpis">
+        <MetricCard icon={Flame} label="连续学习" value={`${stats.streakDays || 0} 天`} detail={`今日 ${stats.todayCompleted || 0}/${stats.dailyGoalUnits || 1} 单元`} />
+        <MetricCard icon={Clock} label="阅读分钟数" value={`${formatNumber(stats.readingMinutes || 0)} 分钟`} detail={`近 7 天 ${formatNumber(stats.weeklyReadingMinutes || 0)} 分钟`} />
+        <MetricCard icon={Check} label="完成单元" value={String(stats.completedUnits || 0)} detail={`平均正确率 ${formatPercent(stats.averageCorrectRate || 0)}`} />
+        <MetricCard icon={BookMarked} label="生词增长" value={`${stats.vocabularyGrowth?.total || stats.vocabularyCount || 0} 个`} detail={`本周 +${stats.vocabularyGrowth?.addedThisWeek || 0}`} />
+      </div>
+
+      <div className="dashboard-grid">
+        <article className="page-section dashboard-panel">
+          <div className="section-head">
+            <div>
+              <h2>阅读分钟趋势</h2>
+              <p>最近 30 天，按每单元学习时长估算。</p>
+            </div>
+            <strong>{formatNumber(stats.todayReadingMinutes || 0)} 分钟/今日</strong>
+          </div>
+          {activity.some((item) => item.minutes > 0) ? (
+            <div className="bar-chart activity-chart" aria-label="阅读分钟趋势">
+              {activity.map((item) => (
+                <div key={item.date} title={`${shortDate(item.date)} · ${item.minutes} 分钟 · ${item.units} 单元`}>
+                  <span style={{ height: `${Math.max(6, Math.round((item.minutes / maxActivityMinutes) * 96))}px` }} />
+                  <small>{item.units || ''}</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <SmallEmpty icon={Clock} text="完成单元后会显示阅读分钟趋势。" />
+          )}
+        </article>
+
+        <article className="page-section dashboard-panel">
+          <div className="section-head">
+            <div>
+              <h2>生词增长</h2>
+              <p>新增生词越多，通常说明材料负担越高。</p>
+            </div>
+            <strong>本月 +{stats.vocabularyGrowth?.addedThisMonth || 0}</strong>
+          </div>
+          {vocabularyDaily.some((item) => item.added > 0) ? (
+            <>
+              <div className="bar-chart vocab-chart" aria-label="生词增长">
+                {vocabularyDaily.map((item) => (
+                  <div key={item.date} title={`${shortDate(item.date)} · 新增 ${item.added} · 累计 ${item.total}`}>
+                    <span style={{ height: `${Math.max(5, Math.round((item.added / maxVocabularyAdded) * 86))}px` }} />
+                  </div>
+                ))}
+              </div>
+              <div className="dashboard-note">
+                <TrendingUp size={16} />
+                平均每单元 {formatDecimal(stats.vocabularyGrowth?.averagePerUnit || 0)} 个生词
+              </div>
+            </>
+          ) : (
+            <SmallEmpty icon={BookMarked} text="点击阅读中的单词或完成单元后会积累生词。" />
+          )}
+        </article>
+
+        <article className="page-section dashboard-panel wide-panel">
+          <div className="section-head">
+            <div>
+              <h2>难度变化趋势</h2>
+              <p>{stats.difficultySummary?.message || '完成单元后会开始记录难度变化。'}</p>
+            </div>
+            <strong>{stats.difficultySummary?.readingLevel || data.settings.readingLevel} / {stats.difficultySummary?.listeningLevel || data.settings.listeningLevel}</strong>
+          </div>
+          {difficultyTrend.length ? (
+            <div className="difficulty-trend">
+              {difficultyTrend.map((item, index) => (
+                <div key={`${item.date}-${index}`} className="difficulty-step" title={`${shortDate(item.date)} · 阅读 ${item.readingLevel} · 听力 ${item.listeningLevel}`}>
+                  <div className="difficulty-date">{shortDate(item.date)}</div>
+                  <div className="difficulty-rails">
+                    <span
+                      className="reading-dot"
+                      style={{ bottom: `${levelPercent(readingLevelOptions, item.readingLevel)}%` }}
+                    />
+                    <span
+                      className="listening-dot"
+                      style={{ bottom: `${levelPercent(listeningLevelOptions, item.listeningLevel)}%` }}
+                    />
+                  </div>
+                  <div className="difficulty-labels">
+                    <span>读 {item.readingLevel}</span>
+                    <span>听 {item.listeningLevel}</span>
+                  </div>
+                  <small>{formatPercent(item.correctRate)} · {item.newVocabularyCount} 词</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <SmallEmpty icon={Activity} text="完成第一个学习单元后，会出现阅读和听力难度趋势。" />
+          )}
+        </article>
+      </div>
+    </section>
+  )
+}
+
 function LoadingScreen() {
   return (
     <main className="loading-screen">
@@ -1018,6 +1204,7 @@ function Sidebar({
   const items: Array<{ view: View; label: string; icon: typeof Home }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
+    { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
@@ -1075,6 +1262,7 @@ function TopBar({
     library: '书库',
     book: '学习单元',
     study: '阅读训练',
+    dashboard: '学习数据',
     reports: '学习报告',
     vocabulary: '生词本',
     tasks: '任务',
@@ -1083,6 +1271,7 @@ function TopBar({
   const items: Array<{ view: View; label: string; icon: typeof Home }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
+    { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
@@ -3098,6 +3287,28 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="stat">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  )
+}
+
+function MetricCard({ icon: Icon, label, value, detail }: { icon: typeof Home; label: string; value: string; detail: string }) {
+  return (
+    <div className="metric-card">
+      <div className="metric-icon">
+        <Icon size={18} />
+      </div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  )
+}
+
+function SmallEmpty({ icon: Icon, text }: { icon: typeof Home; text: string }) {
+  return (
+    <div className="small-empty">
+      <Icon size={24} />
+      <p>{text}</p>
     </div>
   )
 }
