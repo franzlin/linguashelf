@@ -622,7 +622,7 @@ export function App() {
     }
   }
 
-  async function regenerateUnit(unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string }) {
+  async function regenerateUnit(unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) {
     try {
       const result = await runGenerationJob(unit, { force: true, ...levels })
       setError('')
@@ -847,6 +847,7 @@ export function App() {
               setView('reports')
               refresh()
             }}
+            onRegenerateUnit={regenerateUnit}
             onUnitUpdated={updateUnitState}
             onRestoreVersion={restoreUnitVersion}
             onError={setError}
@@ -1542,7 +1543,7 @@ function BookView({
   token: string
   onBack: () => void
   onOpenUnit: (unit: Unit) => void
-  onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string }) => Promise<Unit | null>
+  onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) => Promise<Unit | null>
   onPreGenerateBook: (book: Book, options: { count: number; readingLevel?: string; listeningLevel?: string }) => Promise<number>
   onRenameBook: (book: Book, title: string) => Promise<Book | null>
   onError: (message: string) => void
@@ -2137,6 +2138,7 @@ function StudyView({
   token,
   onBack,
   onCompleted,
+  onRegenerateUnit,
   onUnitUpdated,
   onRestoreVersion,
   onError,
@@ -2145,6 +2147,7 @@ function StudyView({
   token: string
   onBack: () => void
   onCompleted: (report: Report) => void
+  onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) => Promise<Unit | null>
   onUnitUpdated: (unit: Unit) => void
   onRestoreVersion: (unit: Unit, versionId: string) => Promise<Unit>
   onError: (message: string) => void
@@ -2160,16 +2163,26 @@ function StudyView({
   const [speaking, setSpeaking] = useState(false)
   const [audioLoading, setAudioLoading] = useState(false)
   const [restoringVersionId, setRestoringVersionId] = useState('')
+  const [regeneratingFaithful, setRegeneratingFaithful] = useState(false)
+  const [showQualityIssues, setShowQualityIssues] = useState(false)
   const [dynamicDefinitions, setDynamicDefinitions] = useState<Record<string, VocabularyItem>>({})
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef('')
+  const qualityIssuesRef = useRef<HTMLDivElement | null>(null)
   const content = unit.content
+  const qualityAudit = unit.quality?.fidelity?.audit
+  const unsupportedClaims = qualityAudit?.unsupportedClaims || []
+  const missingImportantIdeas = qualityAudit?.missingImportantIdeas || []
+  const lowFidelityScore = qualityAudit?.score !== undefined && Number(qualityAudit.score) < 0.6
+  const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length)
+  const latestVersion = (unit.versions || [])[unit.versions?.length ? unit.versions.length - 1 : -1]
 
   useEffect(() => {
     setAnswers(unit.progress?.answers || {})
     setListeningCompleted(Boolean(unit.progress?.listeningCompleted))
     setCurrentParagraph(Number(unit.progress?.paragraphIndex || 0))
+    setShowQualityIssues(false)
   }, [unit.id, unit.progress?.updatedAt])
 
   useEffect(() => {
@@ -2480,6 +2493,36 @@ function StudyView({
     }
   }
 
+  function revealQualityIssues() {
+    setShowQualityIssues(true)
+    window.setTimeout(() => qualityIssuesRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50)
+  }
+
+  async function regenerateFaithfulVersion() {
+    if (!content) return
+    setRegeneratingFaithful(true)
+    try {
+      const regenerated = await onRegenerateUnit(unit, {
+        readingLevel: content.level.reading,
+        listeningLevel: content.level.listening,
+        fidelityMode: 'strict',
+      })
+      if (regenerated) {
+        onUnitUpdated(regenerated)
+        setShowQualityIssues(false)
+      }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '重新生成更忠实版本失败')
+    } finally {
+      setRegeneratingFaithful(false)
+    }
+  }
+
+  async function restoreLatestVersion() {
+    if (!latestVersion?.id) return
+    await restoreVersion(latestVersion.id)
+  }
+
   return (
     <section className="study-layout">
       <div className="study-main">
@@ -2506,7 +2549,7 @@ function StudyView({
         </details>
 
         {unit.quality && (
-          <details className="source-box quality-box">
+          <details className="source-box quality-box" open={needsFidelityReview}>
             <summary>
               <ChevronDown size={18} />
               生成质量
@@ -2517,6 +2560,22 @@ function StudyView({
               <Stat label="关键词覆盖" value={formatPercent(unit.quality.fidelity?.keywordCoverage || 0)} />
               <Stat label="忠实度审稿" value={unit.quality.fidelity?.audit ? formatPercent(unit.quality.fidelity.audit.score || 0) : '未审稿'} />
             </div>
+            {needsFidelityReview && (
+              <div className="quality-actions" aria-label="忠实度处理">
+                <button type="button" className="ghost-button" onClick={revealQualityIssues}>
+                  <ListChecks size={16} />
+                  查看疑点
+                </button>
+                <button type="button" className="primary-button" onClick={regenerateFaithfulVersion} disabled={regeneratingFaithful}>
+                  {regeneratingFaithful ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+                  重新生成更忠实版本
+                </button>
+                <button type="button" className="ghost-button" onClick={restoreLatestVersion} disabled={!latestVersion?.id || restoringVersionId === latestVersion?.id}>
+                  {restoringVersionId === latestVersion?.id ? <Loader2 className="spin" size={16} /> : <Clock size={16} />}
+                  恢复上一版
+                </button>
+              </div>
+            )}
             {unit.quality.warnings.length > 0 && <p>{unit.quality.warnings.join('；')}</p>}
             {unit.quality.fidelity?.audit && (
               <div className="quality-note">
@@ -2524,6 +2583,23 @@ function StudyView({
                 {unit.quality.fidelity.audit.error && <p>{unit.quality.fidelity.audit.error}</p>}
                 {(unit.quality.fidelity.audit.risks || []).length > 0 && <p>风险：{unit.quality.fidelity.audit.risks.join('；')}</p>}
                 {(unit.quality.fidelity.audit.unsupportedClaims || []).length > 0 && <p>疑似未受原文支持：{unit.quality.fidelity.audit.unsupportedClaims.join('；')}</p>}
+              </div>
+            )}
+            {(showQualityIssues || needsFidelityReview) && (
+              <div ref={qualityIssuesRef} className="quality-issues">
+                <strong>需要优先核对的疑点</strong>
+                {unsupportedClaims.length > 0 && <p>疑似未受原文支持：{unsupportedClaims.join('；')}</p>}
+                {missingImportantIdeas.length > 0 && <p>可能遗漏原文重点：{missingImportantIdeas.join('；')}</p>}
+                {(unit.quality.sourceMap || []).some((item) => !item.sourceRefs.length) && (
+                  <p>
+                    缺少明确来源映射：
+                    {(unit.quality.sourceMap || [])
+                      .filter((item) => !item.sourceRefs.length)
+                      .map((item) => `阅读第 ${item.readingParagraph} 段`)
+                      .join('、')}
+                  </p>
+                )}
+                {!unsupportedClaims.length && !missingImportantIdeas.length && <p>审稿分数偏低，建议先查看逐段来源映射，再决定是否继续学习。</p>}
               </div>
             )}
             {(unit.quality.fidelity?.missingKeywords || []).length > 0 && (

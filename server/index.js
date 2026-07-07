@@ -1557,6 +1557,7 @@ async function generateWithOpenAI(unit, settings) {
   const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
   const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'medium'
   const source = takeWords(unit.sourceText, 2600)
+  const strictFidelityPrompt = buildStrictFidelityPrompt(unit, settings)
   const prompt = `
 Generate a personal English graded-reading lesson from a copyrighted source the user uploaded for private study.
 
@@ -1573,6 +1574,7 @@ Follow these rules:
 - Include 8-12 useful vocabulary items.
 - Include 4-6 comprehension questions.
 - The JSON must match the supplied schema.
+${strictFidelityPrompt}
 
 Source:
 ${source}
@@ -1617,6 +1619,36 @@ ${source}
     id: question.id || nanoid(),
   }))
   return parsed
+}
+
+function buildStrictFidelityPrompt(unit, settings = {}) {
+  if (settings.fidelityMode !== 'strict') return ''
+  const audit = unit?.quality?.fidelity?.audit || {}
+  const unsupportedClaims = (audit.unsupportedClaims || []).slice(0, 8)
+  const missingImportantIdeas = (audit.missingImportantIdeas || []).slice(0, 8)
+  const missingKeywords = (unit?.quality?.fidelity?.missingKeywords || []).slice(0, 10)
+  const unmappedParagraphs = (unit?.quality?.sourceMap || [])
+    .filter((item) => !item.sourceRefs?.length)
+    .map((item) => `reading paragraph ${item.readingParagraph}`)
+    .slice(0, 8)
+
+  const repairNotes = []
+  if (unsupportedClaims.length) repairNotes.push(`Unsupported claims from the previous audit: ${unsupportedClaims.join(' | ')}`)
+  if (missingImportantIdeas.length) repairNotes.push(`Important source ideas possibly missed: ${missingImportantIdeas.join(' | ')}`)
+  if (missingKeywords.length) repairNotes.push(`Source keywords or ideas to preserve when genuinely central: ${missingKeywords.join(', ')}`)
+  if (unmappedParagraphs.length) repairNotes.push(`Previous reading paragraphs without clear source mapping: ${unmappedParagraphs.join(', ')}`)
+
+  return `
+
+Strict fidelity repair mode:
+- The previous version was flagged for low source fidelity. Produce a more conservative version.
+- Every reading paragraph must be traceable to the provided source. If a point is not directly supported, omit it.
+- Do not add background facts, dates, motives, evaluations, examples, or causal explanations unless they appear in the source excerpt.
+- Prefer cautious wording when the source is cautious. Preserve uncertainty and attribution.
+- It is better to be slightly less smooth than to add unsupported content.
+- In fidelityNote, explicitly state that this version was regenerated for strict source fidelity and uses only the provided source excerpt.
+${repairNotes.map((note) => `- ${note}`).join('\n')}
+`
 }
 
 const gradedReadingLessonSchema = {
@@ -3002,10 +3034,12 @@ function applyAdaptiveLeveling(db, userId) {
 let jobQueueActive = false
 
 function generationSettingsFromBody(settings, body = {}) {
+  const fidelityMode = body.fidelityMode === 'strict' || body.qualityFocus === 'fidelity' ? 'strict' : ''
   return {
     ...settings,
     readingLevel: normalizeLevel(readingLevels, body.readingLevel, settings.readingLevel),
     listeningLevel: normalizeLevel(listeningLevels, body.listeningLevel, settings.listeningLevel),
+    fidelityMode,
   }
 }
 
@@ -3042,7 +3076,7 @@ function saveUnitVersion(unit, reason = 'regenerated') {
 }
 
 function applyGeneratedContent(unit, content, options = {}) {
-  if (unit.content && options.force) saveUnitVersion(unit, 'regenerated')
+  if (unit.content && options.force) saveUnitVersion(unit, options.versionReason || 'regenerated')
   unit.content = content
   unit.title = content.title || unit.title
   unit.status = 'generated'
@@ -3113,13 +3147,14 @@ function enqueueGenerationJob(db, userId, unit, settings, body = {}) {
     type: 'generate-unit',
     status: 'queued',
     progress: 0,
-    message: '已加入生成队列',
+    message: generationSettings.fidelityMode === 'strict' ? '已加入忠实度修复队列' : '已加入生成队列',
     unitId: unit.id,
     bookId: unit.bookId,
     force: Boolean(body.force),
     settings: {
       readingLevel: generationSettings.readingLevel,
       listeningLevel: generationSettings.listeningLevel,
+      fidelityMode: generationSettings.fidelityMode,
     },
     createdAt: now,
     updatedAt: now,
@@ -3336,7 +3371,7 @@ async function processJobQueue() {
 
       job.status = 'running'
       job.progress = 15
-      job.message = '正在调用 AI 生成学习单元'
+      job.message = job.settings?.fidelityMode === 'strict' ? '正在调用 AI 生成更忠实版本' : '正在调用 AI 生成学习单元'
       job.startedAt = job.startedAt || new Date().toISOString()
       job.updatedAt = new Date().toISOString()
       unit.generation = {
@@ -3355,6 +3390,7 @@ async function processJobQueue() {
           ...userSettings(db, user.id),
           readingLevel: job.settings?.readingLevel || userSettings(db, user.id).readingLevel,
           listeningLevel: job.settings?.listeningLevel || userSettings(db, user.id).listeningLevel,
+          fidelityMode: job.settings?.fidelityMode || '',
         })
       } catch (error) {
         failure = error.message || '生成失败'
@@ -3422,7 +3458,10 @@ async function processJobQueue() {
         continue
       }
 
-      applyGeneratedContent(unit, content, { force: job.force })
+      applyGeneratedContent(unit, content, {
+        force: job.force,
+        versionReason: job.settings?.fidelityMode === 'strict' ? 'fidelity-regenerated' : 'regenerated',
+      })
       job.status = 'succeeded'
       job.progress = 100
       job.message = '学习单元已生成'
@@ -4045,8 +4084,12 @@ async function createApp() {
       }
 
       if (shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
-      const content = await buildGeneratedContent(unit, generationSettingsFromBody(userSettings(db, req.user.id), req.body))
-      applyGeneratedContent(unit, content, { force: req.body.force })
+      const generationSettings = generationSettingsFromBody(userSettings(db, req.user.id), req.body)
+      const content = await buildGeneratedContent(unit, generationSettings)
+      applyGeneratedContent(unit, content, {
+        force: req.body.force,
+        versionReason: generationSettings.fidelityMode === 'strict' ? 'fidelity-regenerated' : 'regenerated',
+      })
       await writeDb(db)
       res.json({ unit: publicUnit(unit, db, req.user.id) })
     } catch (error) {

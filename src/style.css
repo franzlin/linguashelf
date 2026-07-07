@@ -1445,7 +1445,20 @@ p {
   margin-top: 10px;
 }
 
+.quality-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.quality-actions button {
+  min-height: 40px;
+}
+
 .quality-note,
+.quality-issues,
 .source-map-item,
 .version-item {
   margin-top: 10px;
@@ -1455,11 +1468,18 @@ p {
   background: #fbfcfb;
 }
 
+.quality-issues {
+  border-color: color-mix(in srgb, var(--rust) 42%, var(--line));
+  color: var(--rust);
+  background: var(--rust-2);
+}
+
 .nested-details {
   margin-top: 10px;
 }
 
 .source-map-item p,
+.quality-issues p,
 .quality-note p {
   margin-top: 8px;
   padding: 0;
@@ -1706,6 +1726,7 @@ p {
   .toolbar-inline,
   .unit-actions,
   .review-actions,
+  .quality-actions,
   .batch-control,
   .continue-actions {
     align-items: stretch;
@@ -1749,6 +1770,11 @@ p {
 
   .batch-control button {
     flex: 1 1 180px;
+  }
+
+  .quality-actions button {
+    justify-content: center;
+    width: 100%;
   }
 
   .toolbar-inline .search-input {
