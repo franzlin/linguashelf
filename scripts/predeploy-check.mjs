@@ -103,6 +103,9 @@ async function checkEnvExample() {
     'RATE_LIMIT_GENERATE_UNITS_MAX',
     'RATE_LIMIT_DEFINITIONS_MAX',
     'RATE_LIMIT_AUDIO_MAX',
+    'GEMINI_TTS_OFFICIAL_BASE_URL',
+    'GEMINI_TTS_OFFICIAL_API_KEY',
+    'GEMINI_TTS_OFFICIAL_MODEL',
     'GEMINI_TTS_BASE_URL',
     'GEMINI_TTS_API_KEY',
     'GEMINI_TTS_MODEL',
@@ -139,6 +142,7 @@ async function checkForCommittedSecrets() {
     new RegExp('sk-' + '[A-Za-z0-9_-]{20,}'),
     /(?<!EXAMPLE_)OPENAI_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
     /(?<!EXAMPLE_)OPENAI_TTS_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
+    /(?<!EXAMPLE_)GEMINI_TTS_OFFICIAL_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
     /(?<!EXAMPLE_)GEMINI_TTS_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
     /(?<!EXAMPLE_)PDF_OCR_VISION_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
   ]

@@ -431,7 +431,10 @@ function shouldRateLimitSpeech() {
 }
 
 function shouldRateLimitPodcast() {
-  return (process.env.AI_PROVIDER || 'auto') !== 'mock' && Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_TTS_API_KEY)
+  return (
+    (process.env.AI_PROVIDER || 'auto') !== 'mock' &&
+    Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_TTS_API_KEY)
+  )
 }
 
 function canCreateUser(inviteCode) {
@@ -2084,21 +2087,49 @@ function mockPodcastPcm(scriptText) {
   return silencePcm(seconds * 1000)
 }
 
-async function geminiTtsChunk(text, voiceName) {
-  const provider = process.env.AI_PROVIDER || 'auto'
-  const baseUrl = process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top'
-  const apiKey = process.env.GEMINI_TTS_API_KEY
-  const model = process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts'
-  if (provider === 'mock') return mockPodcastPcm(text)
-  if (!apiKey) throw new Error('未配置 GEMINI_TTS_API_KEY')
+function geminiTtsApiUrl(baseUrl, model) {
+  const normalized = String(baseUrl || '').replace(/\/+$/, '')
+  const apiBase = normalized.endsWith('/v1beta') ? normalized : `${normalized}/v1beta`
+  return `${apiBase}/models/${model}:generateContent`
+}
 
-  const response = await fetch(`${baseUrl}/v1beta/models/${model}:generateContent`, {
+function geminiTtsProviders() {
+  const officialKey = String(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || '').trim()
+  const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
+  const providers = []
+  if (officialKey) {
+    providers.push({
+      name: 'official-gemini',
+      label: '官方 Gemini 3.1',
+      baseUrl: process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com',
+      apiKey: officialKey,
+      model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
+      official: true,
+    })
+  }
+  if (fallbackKey) {
+    providers.push({
+      name: 'gemini-fallback',
+      label: 'Gemini TTS 兜底',
+      baseUrl: process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top',
+      apiKey: fallbackKey,
+      model: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+      official: /generativelanguage\.googleapis\.com/i.test(process.env.GEMINI_TTS_BASE_URL || ''),
+    })
+  }
+  return providers
+}
+
+async function requestGeminiTtsChunk(provider, text, voiceName) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-goog-api-key': provider.apiKey,
+  }
+  if (!provider.official) headers.Authorization = `Bearer ${provider.apiKey}`
+
+  const response = await fetch(geminiTtsApiUrl(provider.baseUrl, provider.model), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers,
     body: JSON.stringify({
       contents: [{ parts: [{ text }] }],
       generationConfig: {
@@ -2109,12 +2140,37 @@ async function geminiTtsChunk(text, voiceName) {
   })
   if (!response.ok) {
     const body = await response.text()
-    throw new Error(`Gemini TTS 失败：${response.status} ${body.slice(0, 200)}`)
+    throw new Error(`${provider.label} 失败：${response.status} ${body.slice(0, 200)}`)
   }
   const data = await response.json()
-  const part = data?.candidates?.[0]?.content?.parts?.find((item) => item.inlineData?.data)
-  if (!part) throw new Error('Gemini TTS 未返回音频数据')
-  return Buffer.from(part.inlineData.data, 'base64')
+  const part = data?.candidates?.[0]?.content?.parts?.find((item) => item.inlineData?.data || item.inline_data?.data)
+  const inlineData = part?.inlineData || part?.inline_data
+  if (!inlineData?.data) throw new Error(`${provider.label} 未返回音频数据`)
+  return {
+    pcm: Buffer.from(inlineData.data, 'base64'),
+    provider: provider.label,
+    model: provider.model,
+    mimeType: inlineData.mimeType || inlineData.mime_type || '',
+  }
+}
+
+async function geminiTtsChunk(text, voiceName) {
+  const provider = process.env.AI_PROVIDER || 'auto'
+  if (provider === 'mock') return { pcm: mockPodcastPcm(text), provider: 'mock', model: 'mock', mimeType: 'audio/l16; rate=24000; channels=1' }
+
+  const providers = geminiTtsProviders()
+  if (!providers.length) throw new Error('未配置 Gemini TTS API key')
+
+  const errors = []
+  for (const item of providers) {
+    try {
+      return await requestGeminiTtsChunk(item, text, voiceName)
+    } catch (error) {
+      errors.push(error?.message || String(error))
+      console.warn(`Gemini TTS provider failed, trying fallback: ${error?.message || error}`)
+    }
+  }
+  throw new Error(`Gemini TTS 全部来源失败：${errors.join(' | ')}`)
 }
 
 async function synthesizePodcastAudio(podcast, onProgress = async () => undefined) {
@@ -2124,6 +2180,8 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
 
   const concurrency = Math.max(1, Math.min(4, podcastTtsConcurrency))
   const pcmParts = new Array(chunks.length)
+  const usedProviders = new Set()
+  const usedModels = new Set()
   let cursor = 0
   let done = 0
 
@@ -2132,7 +2190,10 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
       const index = cursor
       cursor += 1
       const instruction = 'Read in a warm, patient, encouraging teacher voice for an adult English learner. Use clear articulation, normal speed, and natural pauses.\n\n'
-      pcmParts[index] = await geminiTtsChunk(`${instruction}${chunks[index]}`, voice)
+      const result = await geminiTtsChunk(`${instruction}${chunks[index]}`, voice)
+      pcmParts[index] = result.pcm
+      if (result.provider) usedProviders.add(result.provider)
+      if (result.model) usedModels.add(result.model)
       done += 1
       await onProgress(Math.round((done / chunks.length) * 100), done, chunks.length)
     }
@@ -2155,6 +2216,8 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     contentType: audioFile.contentType,
     byteLength: audioFile.byteLength,
     voice,
+    provider: Array.from(usedProviders).join(' + '),
+    model: Array.from(usedModels).join(' + '),
     durationSeconds: audioFile.durationSeconds,
     chunkCount: chunks.length,
     generatedAt: new Date().toISOString(),
@@ -3824,7 +3887,8 @@ async function createApp() {
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         ttsConfigured: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
         ttsProvider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
-        podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_API_KEY),
+        podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_TTS_API_KEY),
+        podcastTtsPrimary: process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview' : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
         maxUnitsPerBook: Number(process.env.MAX_UNITS_PER_BOOK || 240),
         maxPodcastEpisodes,
         maxActivePodcastJobs,

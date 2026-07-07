@@ -260,6 +260,8 @@ type Podcast = {
     contentType?: string
     byteLength?: number
     voice: string
+    provider?: string
+    model?: string
     durationSeconds: number
     chunkCount: number
     generatedAt: string
@@ -420,6 +422,7 @@ type SecurityStatus = {
     ttsConfigured: boolean
     ttsProvider: string
     podcastTtsConfigured: boolean
+    podcastTtsPrimary?: string
     maxUnitsPerBook: number
     maxPodcastEpisodes: number
     maxActivePodcastJobs: number
@@ -2072,6 +2075,7 @@ function BookView({
                       {podcast.audio
                         ? ` · ${String(podcast.audio.format || 'audio').toUpperCase()} · ${formatDuration(podcast.audio.durationSeconds)} · ${formatBytes(podcast.audio.byteLength)} · ${podcast.audio.chunkCount} 块`
                         : ''}
+                      {podcast.audio?.provider ? ` · ${podcast.audio.provider}` : ''}
                       {podcast.progress?.positionSeconds ? ` · 已听 ${formatDuration(podcast.progress.positionSeconds)}` : ''}
                     </p>
                     {busy && <div className="progress-line task-progress"><span style={{ width: `${progress}%` }} /></div>}
@@ -3413,7 +3417,11 @@ function SettingsView({
             <StatusItem label="邀请码" ok={security.security.inviteRequired || !security.security.allowSignup} value={security.security.inviteRequired ? '需要' : '未配置'} />
             <StatusItem label="AI 文本" ok={security.deployment.aiConfigured} value={security.deployment.aiConfigured ? '已配置' : '未配置'} />
             <StatusItem label="TTS" ok={security.deployment.ttsConfigured} value={security.deployment.ttsConfigured ? security.deployment.ttsProvider : '未配置'} />
-            <StatusItem label="播客 TTS" ok={security.deployment.podcastTtsConfigured} value={security.deployment.podcastTtsConfigured ? 'Gemini' : '未配置'} />
+            <StatusItem
+              label="播客 TTS"
+              ok={security.deployment.podcastTtsConfigured}
+              value={security.deployment.podcastTtsConfigured ? security.deployment.podcastTtsPrimary || 'Gemini' : '未配置'}
+            />
             <StatusItem
               label="PDF OCR"
               ok={security.deployment.pdfOcrEnabled}

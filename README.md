@@ -68,6 +68,9 @@ RATE_LIMIT_WINDOW_MINUTES=60
 RATE_LIMIT_GENERATE_UNITS_MAX=20
 RATE_LIMIT_DEFINITIONS_MAX=120
 RATE_LIMIT_AUDIO_MAX=30
+GEMINI_TTS_OFFICIAL_BASE_URL=https://generativelanguage.googleapis.com
+GEMINI_TTS_OFFICIAL_API_KEY=
+GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_BASE_URL=https://api.futureppo.top
 GEMINI_TTS_API_KEY=
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
@@ -99,11 +102,14 @@ OPENAI_TTS_API_KEY=你的语音网关 key
 
 ## AI 播客
 
-书籍详情页支持生成四种单人英语播客：读前导入、读后复盘、全书专题、全书分集讲解。脚本使用文本模型生成，音频使用 Gemini TTS，默认输出 MP3 并缓存在 `data/audio`。
+书籍详情页支持生成四种单人英语播客：读前导入、读后复盘、全书专题、全书分集讲解。脚本使用文本模型生成，音频使用 Gemini TTS，默认输出 MP3 并缓存在 `data/audio`。播客 TTS 会优先使用官方 Gemini 3.1；如果官方来源失败，会自动回退到兼容渠道的 2.5 Flash TTS。
 
 ```bash
+GEMINI_TTS_OFFICIAL_BASE_URL=https://generativelanguage.googleapis.com
+GEMINI_TTS_OFFICIAL_API_KEY=你的 Google Gemini API key
+GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_BASE_URL=https://api.futureppo.top
-GEMINI_TTS_API_KEY=你的 Gemini TTS 代理 key
+GEMINI_TTS_API_KEY=你的 Gemini TTS 兜底渠道 key
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
 GEMINI_TTS_VOICE=Kore
 ```
