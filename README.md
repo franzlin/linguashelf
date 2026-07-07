@@ -1,6 +1,6 @@
 # LinguaShelf
 
-AI 英语分级阅读器，面向个人学习使用。支持登录、上传 EPUB/文字版 PDF、自动拆分主题单元、生成分级阅读、听力预热、点击式中文辅助、细粒度续学进度、生词本、学习报告、自动难度调整、任务中心和 PWA 移动端使用。
+AI 英语分级阅读器，面向个人学习使用。支持登录、上传 EPUB/PDF、扫描版 PDF OCR、自动拆分主题单元、生成分级阅读、听力预热、点击式中文辅助、细粒度续学进度、生词本、学习报告、自动难度调整、任务中心和 PWA 移动端使用。
 
 ## 运行
 
@@ -51,6 +51,11 @@ LOGIN_MAX_FAILURES=8
 MAX_UPLOAD_MB=50
 MAX_EPUB_UPLOAD_MB=50
 MAX_PDF_UPLOAD_MB=50
+PDF_OCR_ENABLED=true
+PDF_OCR_LANGUAGE=eng
+PDF_OCR_DPI=220
+PDF_OCR_MAX_PAGES=120
+PDF_OCR_COMMAND_TIMEOUT_MS=120000
 MAX_EPUB_EXPANDED_MB=200
 MAX_EPUB_ENTRIES=2000
 RATE_LIMIT_WINDOW_MINUTES=60
@@ -103,10 +108,11 @@ GEMINI_TTS_VOICE=Kore
 
 - EPUB，建议 50MB 以内
 - 文字版 PDF，建议 50MB 以内
+- 清晰的英文扫描版 PDF，会在原生文字抽取失败时自动 OCR
 
-扫描版 PDF 第一版会提示不适合处理。
+OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
 
-解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；文字版 PDF 会自动清理重复页眉页脚、页码，并用章节标题启发式拆分。OCR 扫描版仍暂不支持。
+解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；PDF 会优先抽取可复制文字，失败时使用 OCR，并自动清理重复页眉页脚、页码，再用章节标题启发式拆分。
 
 书籍导入后可以在书籍详情页重命名，避免标题只跟随原始文件名或解析出的元数据。
 

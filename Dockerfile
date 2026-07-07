@@ -17,6 +17,10 @@ ENV PORT=5173
 ENV STORAGE_DRIVER=sqlite
 ENV DATA_DIR=/app/data
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 

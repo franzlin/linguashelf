@@ -1,7 +1,10 @@
 import 'dotenv/config'
 import crypto from 'node:crypto'
+import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import multer from 'multer'
@@ -13,6 +16,7 @@ import lamejs from '@breezystack/lamejs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
+const execFileAsync = promisify(execFile)
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, 'data')
 const uploadDir = path.join(dataDir, 'uploads')
 const audioDir = path.join(dataDir, 'audio')
@@ -32,6 +36,11 @@ const maxEpubUploadBytes = bytesFromMegabytes(process.env.MAX_EPUB_UPLOAD_MB, Ma
 const maxPdfUploadBytes = bytesFromMegabytes(process.env.MAX_PDF_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
 const maxEpubExpandedBytes = bytesFromMegabytes(process.env.MAX_EPUB_EXPANDED_MB, 200)
 const maxEpubEntries = Number(process.env.MAX_EPUB_ENTRIES || 2000)
+const pdfOcrEnabled = parseBoolean(process.env.PDF_OCR_ENABLED, true)
+const pdfOcrLanguage = String(process.env.PDF_OCR_LANGUAGE || 'eng')
+const pdfOcrDpi = Math.max(120, Math.min(350, Number(process.env.PDF_OCR_DPI || 220)))
+const pdfOcrMaxPages = Math.max(1, Number(process.env.PDF_OCR_MAX_PAGES || 120))
+const pdfOcrCommandTimeoutMs = Math.max(10_000, Number(process.env.PDF_OCR_COMMAND_TIMEOUT_MS || 120_000))
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MINUTES || 60) * 60 * 1000
 const podcastLexileDefault = Number(process.env.PODCAST_LEXILE_DEFAULT || 900)
 const podcastLexileMin = 500
@@ -943,11 +952,12 @@ async function parsePdf(buffer, filename) {
     const result = await parser.getText()
     const pages = cleanPdfPages(result.pages || [])
     const usable = pages.filter((page) => page.wordCount >= 60)
-    if (!usable.length) {
-      throw new Error('这个 PDF 可能是扫描版或文字过少，第一版暂不适合处理')
-    }
+    const sourcePages = usable.length ? usable : await ocrPdfFallback(buffer, inferPdfPageCount(result))
 
-    const chapters = groupPdfPages(usable)
+    const chapters = groupPdfPages(sourcePages)
+    if (!chapters.length) {
+      throw new Error('PDF 已解析，但可用于生成学习单元的英文正文太少')
+    }
     return {
       title: filename.replace(/\.[^.]+$/, ''),
       author: '',
@@ -957,6 +967,95 @@ async function parsePdf(buffer, filename) {
   } finally {
     await parser.destroy()
   }
+}
+
+function inferPdfPageCount(result) {
+  const candidates = [
+    result?.pages?.length,
+    result?.total,
+    result?.numpages,
+    result?.numPages,
+    result?.info?.Pages,
+  ]
+  const count = candidates.map((item) => Number(item)).find((item) => Number.isFinite(item) && item > 0)
+  return Math.max(1, Math.round(count || 1))
+}
+
+async function ocrPdfFallback(buffer, pageCount) {
+  if (!pdfOcrEnabled) {
+    throw new Error('这个 PDF 可能是扫描版或文字过少，当前服务器未开启 OCR')
+  }
+  const maxPages = Math.min(pageCount, pdfOcrMaxPages)
+  const pages = await ocrPdfPages(buffer, maxPages)
+  const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= 40)
+  if (!cleaned.length) {
+    throw new Error('OCR 没能识别出足够的英文正文，请确认 PDF 清晰、方向正确，且内容主要为英文')
+  }
+  return cleaned
+}
+
+async function ocrPdfPages(buffer, maxPages) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-ocr-'))
+  const pdfPath = path.join(tmpDir, 'source.pdf')
+  const pages = []
+  try {
+    await fs.writeFile(pdfPath, buffer)
+    for (let page = 1; page <= maxPages; page += 1) {
+      const prefix = path.join(tmpDir, `page-${String(page).padStart(4, '0')}`)
+      const imagePath = `${prefix}.png`
+      await runOcrCommand('pdftoppm', [
+        '-f',
+        String(page),
+        '-l',
+        String(page),
+        '-r',
+        String(pdfOcrDpi),
+        '-png',
+        '-singlefile',
+        pdfPath,
+        prefix,
+      ])
+      const { stdout } = await runOcrCommand('tesseract', [imagePath, 'stdout', '-l', pdfOcrLanguage, '--psm', '3'])
+      const text = normalizeOcrText(stdout)
+      if (wordCount(text) >= 20) {
+        pages.push({
+          num: page,
+          text,
+        })
+      }
+      await fs.rm(imagePath, { force: true }).catch(() => undefined)
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+  return pages
+}
+
+async function runOcrCommand(command, args) {
+  try {
+    return await execFileAsync(command, args, {
+      timeout: pdfOcrCommandTimeoutMs,
+      maxBuffer: 12 * 1024 * 1024,
+    })
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error('服务器缺少 OCR 组件，请安装 poppler-utils 和 tesseract-ocr 后重试')
+    }
+    if (error?.killed || error?.signal === 'SIGTERM') {
+      throw new Error('OCR 处理超时，请尝试页数更少或更清晰的 PDF')
+    }
+    const detail = String(error?.stderr || error?.message || '').trim()
+    throw new Error(detail ? `OCR 处理失败：${detail.slice(0, 240)}` : 'OCR 处理失败')
+  }
+}
+
+function normalizeOcrText(text) {
+  return normalizeText(
+    String(text || '')
+      .replace(/[|]{2,}/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+  )
 }
 
 function groupPdfPages(pages) {
@@ -3405,6 +3504,10 @@ async function createApp() {
         maxUploadMb: Math.round(maxUploadBytes / 1024 / 1024),
         maxEpubUploadMb: Math.round(maxEpubUploadBytes / 1024 / 1024),
         maxPdfUploadMb: Math.round(maxPdfUploadBytes / 1024 / 1024),
+        pdfOcrEnabled,
+        pdfOcrLanguage,
+        pdfOcrDpi,
+        pdfOcrMaxPages,
         rateLimitWindowMinutes: Math.round(rateLimitWindowMs / 60000),
         rateLimits: {
           generateUnits: aiRateLimits['generate-unit'].max,
@@ -3452,7 +3555,7 @@ async function createApp() {
       const original = req.file.originalname || 'book'
       const ext = path.extname(original).toLowerCase()
       if (!['.epub', '.pdf'].includes(ext)) {
-        res.status(400).json({ error: '第一版仅支持 EPUB 和文字版 PDF' })
+        res.status(400).json({ error: '目前支持 EPUB 和 PDF 文件' })
         return
       }
       if (ext === '.epub' && req.file.size > maxEpubUploadBytes) {

@@ -398,6 +398,10 @@ type SecurityStatus = {
     maxUnitsPerBook: number
     maxPodcastEpisodes: number
     maxActivePodcastJobs: number
+    pdfOcrEnabled: boolean
+    pdfOcrLanguage: string
+    pdfOcrDpi: number
+    pdfOcrMaxPages: number
     activeJobs: number
   }
 }
@@ -1335,7 +1339,7 @@ function LibraryView({
   async function uploadFile(file: File) {
     const lowerName = file.name.toLowerCase()
     if (!lowerName.endsWith('.epub') && !lowerName.endsWith('.pdf')) {
-      onError('请选择 EPUB 或文字版 PDF 文件')
+      onError('请选择 EPUB 或 PDF 文件')
       return
     }
     if (uploading) return
@@ -1365,7 +1369,7 @@ function LibraryView({
       return name.endsWith('.epub') || name.endsWith('.pdf')
     })
     if (!file) {
-      onError('请拖入 EPUB 或文字版 PDF 文件')
+      onError('请拖入 EPUB 或 PDF 文件')
       return
     }
     uploadFile(file)
@@ -1402,7 +1406,7 @@ function LibraryView({
             {uploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
             上传 EPUB/PDF
           </button>
-          <span>PDF 仅支持可复制文字</span>
+          <span>PDF 支持文字抽取，扫描版会自动 OCR</span>
         </div>
         <input
           ref={inputRef}
@@ -1443,7 +1447,7 @@ function LibraryView({
         <div className="empty-state">
           <FileText size={32} />
           <h2>还没有书</h2>
-          <p>支持 EPUB 和文字版 PDF；扫描版 PDF 暂不处理。</p>
+          <p>支持 EPUB、文字版 PDF 和清晰的英文扫描版 PDF。</p>
         </div>
       ) : (
         <div className="book-grid">
@@ -3243,6 +3247,7 @@ function SettingsView({
             <StatusItem label="AI 文本" ok={security.deployment.aiConfigured} value={security.deployment.aiConfigured ? '已配置' : '未配置'} />
             <StatusItem label="TTS" ok={security.deployment.ttsConfigured} value={security.deployment.ttsConfigured ? security.deployment.ttsProvider : '未配置'} />
             <StatusItem label="播客 TTS" ok={security.deployment.podcastTtsConfigured} value={security.deployment.podcastTtsConfigured ? 'Gemini' : '未配置'} />
+            <StatusItem label="PDF OCR" ok={security.deployment.pdfOcrEnabled} value={security.deployment.pdfOcrEnabled ? `${security.deployment.pdfOcrLanguage}/${security.deployment.pdfOcrDpi}dpi` : '关闭'} />
             <StatusItem label="会话" ok value={`${security.security.sessionDays} 天`} />
             <StatusItem label="任务" ok value={`${security.deployment.activeJobs} 个运行中`} />
           </div>

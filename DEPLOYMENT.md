@@ -10,6 +10,8 @@
 - 一个已经解析到服务器公网 IP 的域名
 - 80 和 443 端口开放
 
+Docker 镜像会安装 PDF OCR 所需的 `poppler-utils` 和 `tesseract-ocr`。如果选择非 Docker 部署，需要在宿主机额外安装这两个组件。
+
 ## 2. 配置环境变量
 
 复制 `.env.example` 为 `.env`，至少修改：
@@ -47,6 +49,11 @@ LOGIN_MAX_FAILURES=8
 MAX_UPLOAD_MB=50
 MAX_EPUB_UPLOAD_MB=50
 MAX_PDF_UPLOAD_MB=50
+PDF_OCR_ENABLED=true
+PDF_OCR_LANGUAGE=eng
+PDF_OCR_DPI=220
+PDF_OCR_MAX_PAGES=120
+PDF_OCR_COMMAND_TIMEOUT_MS=120000
 MAX_EPUB_EXPANDED_MB=200
 MAX_EPUB_ENTRIES=2000
 MAX_BATCH_GENERATE_UNITS=5
@@ -206,7 +213,7 @@ npm start
 
 - 用电脑登录并确认初始管理员账号可用
 - 用 Android Chrome 登录并添加到主屏幕
-- 上传一本小型 EPUB 或文字版 PDF
+- 上传一本小型 EPUB、文字版 PDF 或清晰英文扫描版 PDF
 - 在书籍详情页重命名一次书籍，确认书库和详情页同步显示新书名
 - 生成 1 个单元并确认分级阅读、单词释义、听力预热可用
 - 分别生成“读前导入”和“全书分集讲解”各 1 集 AI 播客，确认“生成下一集”不会一次排满所有分集，并确认 MP3 或 WAV 音频可播放、可下载、可记录播放进度
