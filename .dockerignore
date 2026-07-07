@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+backups
+work-screenshots
+work-*.wav
+sample-*.wav
+sample-tts.mjs
+*.log
+.env
+.env.*
+!.env.example
+.git
+.idea
+.vscode

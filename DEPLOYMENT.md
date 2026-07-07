@@ -1,0 +1,188 @@
+# LinguaShelf 部署指南
+
+推荐方式是 Docker Compose + Caddy。Caddy 会自动申请和续期 HTTPS 证书，应用数据保存在 Docker volume 中。
+
+## 1. 准备服务器
+
+服务器需要：
+
+- Docker 和 Docker Compose
+- 一个已经解析到服务器公网 IP 的域名
+- 80 和 443 端口开放
+
+## 2. 配置环境变量
+
+复制 `.env.example` 为 `.env`，至少修改：
+
+```bash
+APP_DOMAIN=reader.example.com
+OPENAI_API_KEY=你的文本生成 key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.5
+OPENAI_TTS_PROVIDER=mimo
+OPENAI_TTS_MODEL=mimo-v2.5-tts
+OPENAI_TTS_VOICES=Mia,Milo
+OPENAI_TTS_BASE_URL=https://api.xiaomimimo.com/v1
+OPENAI_TTS_API_KEY=你的语音 key
+GEMINI_TTS_BASE_URL=https://api.futureppo.top
+GEMINI_TTS_API_KEY=你的 Gemini TTS key
+GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+GEMINI_TTS_VOICE=Kore
+ALLOW_SIGNUP=false
+SIGNUP_INVITE_CODE=可选的邀请码
+INITIAL_ADMIN_EMAIL=你的邮箱
+INITIAL_ADMIN_PASSWORD=初始密码
+```
+
+生产环境建议保持：
+
+```bash
+NODE_ENV=production
+STORAGE_DRIVER=sqlite
+DATA_DIR=/app/data
+TRUST_PROXY=true
+SESSION_DAYS=30
+LOGIN_WINDOW_MINUTES=10
+LOGIN_MAX_FAILURES=8
+MAX_UPLOAD_MB=50
+MAX_EPUB_UPLOAD_MB=50
+MAX_PDF_UPLOAD_MB=50
+MAX_EPUB_EXPANDED_MB=200
+MAX_EPUB_ENTRIES=2000
+MAX_BATCH_GENERATE_UNITS=5
+MAX_AUTO_REGEN_ATTEMPTS=1
+RATE_LIMIT_WINDOW_MINUTES=60
+RATE_LIMIT_GENERATE_UNITS_MAX=20
+RATE_LIMIT_DEFINITIONS_MAX=120
+RATE_LIMIT_AUDIO_MAX=30
+PODCAST_LEXILE_DEFAULT=900
+PODCAST_SOURCE_WORDS_PER_EPISODE=2200
+MAX_PODCAST_EPISODES=12
+PODCAST_TTS_CHUNK_CHARS=2500
+PODCAST_TTS_CONCURRENCY=2
+PODCAST_AUDIO_FORMAT=mp3
+PODCAST_MP3_KBPS=64
+PODCAST_SCRIPT_SOURCE_CHUNK_WORDS=2600
+MAX_ACTIVE_PODCAST_JOBS=2
+RATE_LIMIT_PODCAST_EPISODES_MAX=12
+QUALITY_AUDIT_MODE=auto
+```
+
+## 3. Docker Compose 启动
+
+```bash
+docker compose up -d --build
+```
+
+查看状态：
+
+```bash
+docker compose ps
+docker compose logs -f app
+```
+
+健康检查：
+
+```bash
+curl https://你的域名/api/health
+curl https://你的域名/api/ready
+```
+
+## 4. 部署前总验收
+
+在本地或服务器项目目录执行：
+
+```bash
+npm ci
+npm run check
+npm run build
+npm audit --omit=dev --audit-level=moderate
+npm run predeploy
+```
+
+服务启动后执行：
+
+```bash
+BASE_URL=https://你的域名 npm run predeploy
+```
+
+`predeploy` 会检查部署文件、环境变量样例、构建产物、`.dockerignore`、疑似密钥泄漏、健康接口、PWA manifest/service worker 和 CSP header。
+
+如果需要浏览器级冒烟测试，先确保服务可访问，再执行：
+
+```bash
+BASE_URL=https://你的域名 npm run smoke
+```
+
+## 5. 备份
+
+容器内备份：
+
+```bash
+docker compose exec app npm run backup -- /app/backups/linguashelf.zip
+```
+
+把备份文件复制到服务器当前目录：
+
+```bash
+docker compose cp app:/app/backups/linguashelf.zip ./linguashelf.zip
+```
+
+建议把备份文件再同步到云盘或对象存储。
+
+## 6. 恢复
+
+先停止应用：
+
+```bash
+docker compose stop app
+```
+
+把备份复制进容器并恢复：
+
+```bash
+docker compose cp ./linguashelf.zip app:/app/backups/linguashelf.zip
+docker compose run --rm app npm run restore -- /app/backups/linguashelf.zip
+docker compose up -d
+```
+
+恢复脚本会先把当前数据目录改名保留，再解压备份。
+
+## 7. 非 Docker 部署
+
+在服务器上安装 Node.js 22，然后：
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+可参考 `deploy/systemd/linguashelf.service` 创建 systemd 服务。反向代理可用 Nginx 或 Caddy，把外部 HTTPS 流量转发到 `127.0.0.1:5173`。
+
+## 8. 数据位置
+
+默认数据目录：
+
+- Docker：`/app/data`
+- 本地：项目目录下的 `data`
+
+目录中包含：
+
+- `app.sqlite`：账号、书籍、学习单元、报告、生词、任务记录
+- `uploads/`：按设置保留的原始 EPUB/PDF
+- `audio/`：TTS 音频缓存
+
+## 9. 上线后检查
+
+首次上线后建议按顺序检查：
+
+- 用电脑登录并确认初始管理员账号可用
+- 用 Android Chrome 登录并添加到主屏幕
+- 上传一本小型 EPUB 或文字版 PDF
+- 在书籍详情页重命名一次书籍，确认书库和详情页同步显示新书名
+- 生成 1 个单元并确认分级阅读、单词释义、听力预热可用
+- 分别生成“读前导入”和“全书分集讲解”各 1 集 AI 播客，确认“生成下一集”不会一次排满所有分集，并确认 MP3 或 WAV 音频可播放、可下载、可记录播放进度
+- 完成一个学习单元并确认学习报告生成
+- 在手机和电脑之间确认进度同步
+- 立刻执行一次备份并把备份文件复制到服务器外

@@ -1,0 +1,16 @@
+[Unit]
+Description=LinguaShelf
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/linguashelf
+EnvironmentFile=/opt/linguashelf/.env
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+User=linguashelf
+Group=linguashelf
+
+[Install]
+WantedBy=multi-user.target

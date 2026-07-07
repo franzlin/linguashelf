@@ -1,0 +1,38 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 5173
+      STORAGE_DRIVER: sqlite
+      DATA_DIR: /app/data
+      TRUST_PROXY: "true"
+    volumes:
+      - linguashelf-data:/app/data
+      - linguashelf-backups:/app/backups
+    expose:
+      - "5173"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  linguashelf-data:
+  linguashelf-backups:
+  caddy-data:
+  caddy-config:
