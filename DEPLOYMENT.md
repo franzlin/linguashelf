@@ -116,6 +116,8 @@ BASE_URL=https://你的域名 npm run smoke
 
 ## 5. 备份
 
+上线后建议立刻做一次备份，并设置每日自动备份。备份包含 `data/` 目录，也就是 SQLite 数据库、上传文件和音频缓存；`.env` 不会自动打进备份，避免 API key 被误传。
+
 容器内备份：
 
 ```bash
@@ -128,7 +130,32 @@ docker compose exec app npm run backup -- /app/backups/linguashelf.zip
 docker compose cp app:/app/backups/linguashelf.zip ./linguashelf.zip
 ```
 
-建议把备份文件再同步到云盘或对象存储。
+建议把备份文件再同步到云盘、对象存储，或下载到自己的电脑。
+
+服务器每日自动备份：
+
+```bash
+mkdir -p /opt/linguashelf-backups
+bash /opt/linguashelf/deploy/backup-daily.sh
+```
+
+确认手动执行成功后，加入 `cron`：
+
+```bash
+crontab -e
+```
+
+追加一行，每天凌晨 3:20 备份，并默认保留 14 天：
+
+```cron
+20 3 * * * APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 bash /opt/linguashelf/deploy/backup-daily.sh >> /var/log/linguashelf-backup.log 2>&1
+```
+
+从服务器下载最近的备份到本机：
+
+```bash
+scp root@你的服务器IP:/opt/linguashelf-backups/linguashelf-*.zip .
+```
 
 ## 6. 恢复
 
