@@ -109,7 +109,7 @@ OPENAI_TTS_API_KEY=你的语音网关 key
 
 ```bash
 GEMINI_TTS_OFFICIAL_BASE_URL=https://generativelanguage.googleapis.com
-GEMINI_TTS_OFFICIAL_API_KEY=你的 Google Gemini API key
+GEMINI_TTS_OFFICIAL_API_KEY=你的 Google Gemini API key，多个 key 用英文逗号分隔
 GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_INPUT_TOKEN_LIMIT=8192
 GEMINI_TTS_OUTPUT_TOKEN_LIMIT=16384
@@ -121,7 +121,7 @@ PODCAST_TTS_CHUNK_TOKENS=5500
 PODCAST_TTS_CHUNK_CHARS=8000
 ```
 
-设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。单集支持下载、删除、重生成、播放进度记忆和 Android 锁屏媒体控制。官方 Gemini 3.1 TTS 的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。
+设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。官方 Gemini 3.1 TTS 的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。官方 TTS 支持配置多个 key，系统会按音频分块轮流使用；某条 key 额度耗尽、限流或地区不可用时，只会临时冷却那一条。
 
 ## 支持格式
 

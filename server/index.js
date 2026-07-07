@@ -80,6 +80,7 @@ const loginAttempts = new Map()
 const actionRateBuckets = new Map()
 const geminiTtsProviderCooldowns = new Map()
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
+let geminiOfficialTtsCursor = 0
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -2140,7 +2141,7 @@ function geminiTtsApiUrl(baseUrl, model) {
 }
 
 function geminiTtsProviderKey(provider) {
-  return `${provider.name}:${provider.model}:${provider.baseUrl}`
+  return `${provider.name}:${provider.keyId || 'default'}:${provider.model}:${provider.baseUrl}`
 }
 
 function shouldCooldownOfficialGeminiTts(message) {
@@ -2149,20 +2150,38 @@ function shouldCooldownOfficialGeminiTts(message) {
   )
 }
 
+function parseApiKeyList(...values) {
+  const keys = values
+    .flatMap((value) => String(value || '').split(/[,\s;]+/))
+    .map((value) => value.trim())
+    .filter(Boolean)
+  return [...new Set(keys)]
+}
+
+function apiKeyId(apiKey) {
+  return crypto.createHash('sha256').update(String(apiKey || '')).digest('hex').slice(0, 10)
+}
+
 function geminiTtsProviders() {
-  const officialKey = String(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || '').trim()
+  const officialKeys = parseApiKeyList(process.env.GEMINI_TTS_OFFICIAL_API_KEY, process.env.GOOGLE_API_KEY)
   const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
   const providers = []
-  if (officialKey) {
-    providers.push({
+  const officialProviders = officialKeys.map((apiKey, index) => ({
       name: 'official-gemini',
-      label: '官方 Gemini 3.1',
+      label: officialKeys.length > 1 ? `官方 Gemini 3.1 #${index + 1}` : '官方 Gemini 3.1',
       baseUrl: process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com',
-      apiKey: officialKey,
+      apiKey,
+      keyId: apiKeyId(apiKey),
       model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
       maxInputTokens: geminiTtsInputTokenLimit,
       official: true,
-    })
+    }))
+  if (officialProviders.length > 1) {
+    const offset = geminiOfficialTtsCursor % officialProviders.length
+    geminiOfficialTtsCursor += 1
+    providers.push(...officialProviders.slice(offset), ...officialProviders.slice(0, offset))
+  } else {
+    providers.push(...officialProviders)
   }
   if (fallbackKey) {
     providers.push({
