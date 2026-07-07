@@ -1952,9 +1952,17 @@ function BookView({
       </div>
 
       <div className="unit-toolbar">
-        <span>重生成难度</span>
-        <Segmented options={readingLevelOptions} value={readingLevel} onChange={setReadingLevel} />
-        <Segmented options={listeningLevelOptions} value={listeningLevel} onChange={setListeningLevel} />
+        <div className="unit-difficulty-controls">
+          <span className="toolbar-label">单元生成难度</span>
+          <div className="difficulty-picker">
+            <span>阅读文本</span>
+            <Segmented ariaLabel="阅读文本难度" options={readingLevelOptions} value={readingLevel} onChange={setReadingLevel} />
+          </div>
+          <div className="difficulty-picker">
+            <span>听力预热</span>
+            <Segmented ariaLabel="听力预热难度" options={listeningLevelOptions} value={listeningLevel} onChange={setListeningLevel} />
+          </div>
+        </div>
         <div className="batch-control">
           <input
             aria-label="预生成数量"
@@ -3289,9 +3297,9 @@ function SettingGroup({ title, children }: { title: string; children: ReactNode 
   )
 }
 
-function Segmented({ options, value, onChange }: { options: string[]; value: string; onChange: (value: string) => void }) {
+function Segmented({ options, value, onChange, ariaLabel }: { options: string[]; value: string; onChange: (value: string) => void; ariaLabel?: string }) {
   return (
-    <div className="segmented">
+    <div className="segmented" role="group" aria-label={ariaLabel}>
       {options.map((option) => (
         <button key={option} type="button" className={value === option ? 'active' : ''} onClick={() => onChange(option)}>
           {option}

@@ -995,9 +995,33 @@ p {
   background: var(--surface-2);
 }
 
-.unit-toolbar > span {
+.toolbar-label {
   color: var(--muted);
   font-weight: 760;
+}
+
+.unit-difficulty-controls,
+.difficulty-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.unit-difficulty-controls {
+  min-width: 0;
+  flex: 1 1 620px;
+}
+
+.difficulty-picker {
+  min-width: 0;
+}
+
+.difficulty-picker > span {
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 760;
+  white-space: nowrap;
 }
 
 .batch-control {
@@ -1691,11 +1715,27 @@ p {
     width: 100%;
   }
 
+  .unit-difficulty-controls,
+  .difficulty-picker {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .unit-difficulty-controls {
+    flex: 0 1 auto;
+  }
+
   .toolbar-inline .segmented,
   .unit-toolbar .segmented,
   .setting-row .segmented {
     width: 100%;
     overflow-x: auto;
+  }
+
+  .unit-toolbar .segmented button {
+    min-width: 40px;
+    padding: 0 7px;
   }
 
   .batch-control {
