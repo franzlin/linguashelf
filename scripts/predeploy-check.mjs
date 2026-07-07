@@ -90,6 +90,12 @@ async function checkEnvExample() {
     'STORAGE_DRIVER',
     'MAX_UPLOAD_MB',
     'PDF_OCR_ENABLED',
+    'PDF_OCR_PROVIDER',
+    'PDF_OCR_VISION_MODEL',
+    'PDF_OCR_VISION_BASE_URL',
+    'PDF_OCR_VISION_API_KEY',
+    'PDF_OCR_VISION_DPI',
+    'PDF_OCR_VISION_MIN_WORDS',
     'PDF_OCR_LANGUAGE',
     'PDF_OCR_DPI',
     'PDF_OCR_MAX_PAGES',
@@ -134,6 +140,7 @@ async function checkForCommittedSecrets() {
     /(?<!EXAMPLE_)OPENAI_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
     /(?<!EXAMPLE_)OPENAI_TTS_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
     /(?<!EXAMPLE_)GEMINI_TTS_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
+    /(?<!EXAMPLE_)PDF_OCR_VISION_API_KEY=(?!\s*$|你的|your)[^\s]+/i,
   ]
   const excludedDirs = new Set(['node_modules', 'data', 'backups', 'dist', '.git', 'work-screenshots'])
   const excludedFiles = new Set(['.env'])

@@ -37,10 +37,16 @@ const maxPdfUploadBytes = bytesFromMegabytes(process.env.MAX_PDF_UPLOAD_MB, Math
 const maxEpubExpandedBytes = bytesFromMegabytes(process.env.MAX_EPUB_EXPANDED_MB, 200)
 const maxEpubEntries = Number(process.env.MAX_EPUB_ENTRIES || 2000)
 const pdfOcrEnabled = parseBoolean(process.env.PDF_OCR_ENABLED, true)
+const pdfOcrProvider = String(process.env.PDF_OCR_PROVIDER || 'hunyuan-first').toLowerCase()
 const pdfOcrLanguage = String(process.env.PDF_OCR_LANGUAGE || 'eng')
 const pdfOcrDpi = Math.max(120, Math.min(350, Number(process.env.PDF_OCR_DPI || 220)))
 const pdfOcrMaxPages = Math.max(1, Number(process.env.PDF_OCR_MAX_PAGES || 120))
 const pdfOcrCommandTimeoutMs = Math.max(10_000, Number(process.env.PDF_OCR_COMMAND_TIMEOUT_MS || 120_000))
+const pdfOcrVisionModel = String(process.env.PDF_OCR_VISION_MODEL || 'hunyuan-ocr')
+const pdfOcrVisionBaseUrl = openAiCompatibleBaseUrl(process.env.PDF_OCR_VISION_BASE_URL || process.env.GEMINI_TTS_BASE_URL || '')
+const pdfOcrVisionApiKey = String(process.env.PDF_OCR_VISION_API_KEY || process.env.GEMINI_TTS_API_KEY || '')
+const pdfOcrVisionDpi = Math.max(90, Math.min(220, Number(process.env.PDF_OCR_VISION_DPI || 110)))
+const pdfOcrVisionMinWords = Math.max(10, Number(process.env.PDF_OCR_VISION_MIN_WORDS || 40))
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MINUTES || 60) * 60 * 1000
 const podcastLexileDefault = Number(process.env.PODCAST_LEXILE_DEFAULT || 900)
 const podcastLexileMin = 500
@@ -300,6 +306,12 @@ function closeStore() {
 function parseBoolean(value, fallback) {
   if (value === undefined || value === '') return fallback
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase())
+}
+
+function openAiCompatibleBaseUrl(value) {
+  const base = String(value || '').replace(/\/+$/, '')
+  if (!base) return ''
+  return base.endsWith('/v1') ? base : `${base}/v1`
 }
 
 function bytesFromMegabytes(value, fallbackMb) {
@@ -986,49 +998,156 @@ async function ocrPdfFallback(buffer, pageCount) {
     throw new Error('这个 PDF 可能是扫描版或文字过少，当前服务器未开启 OCR')
   }
   const maxPages = Math.min(pageCount, pdfOcrMaxPages)
-  const pages = await ocrPdfPages(buffer, maxPages)
-  const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= 40)
-  if (!cleaned.length) {
-    throw new Error('OCR 没能识别出足够的英文正文，请确认 PDF 清晰、方向正确，且内容主要为英文')
+  const errors = []
+
+  if (shouldUseVisionOcr()) {
+    try {
+      const pages = await ocrPdfPagesWithVision(buffer, maxPages)
+      const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= pdfOcrVisionMinWords)
+      if (hasEnoughOcrText(cleaned)) {
+        console.info(`PDF OCR completed with ${pdfOcrVisionModel}: ${cleaned.length}/${maxPages} pages`)
+        return cleaned
+      }
+      const message = `${pdfOcrVisionModel} 识别正文不足`
+      errors.push(message)
+      console.warn(`PDF OCR ${message}; falling back to tesseract`)
+    } catch (error) {
+      const message = `${pdfOcrVisionModel} 失败：${String(error?.message || error).slice(0, 160)}`
+      errors.push(message)
+      console.warn(`PDF OCR ${message}; falling back to tesseract`)
+    }
   }
+
+  const pages = await ocrPdfPagesWithTesseract(buffer, maxPages)
+  const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= 40)
+  if (!hasEnoughOcrText(cleaned)) {
+    const detail = errors.length ? `；${errors.join('；')}` : ''
+    throw new Error(`OCR 没能识别出足够的英文正文，请确认 PDF 清晰、方向正确，且内容主要为英文${detail}`)
+  }
+  console.info(`PDF OCR completed with tesseract: ${cleaned.length}/${maxPages} pages`)
   return cleaned
 }
 
-async function ocrPdfPages(buffer, maxPages) {
+function hasEnoughOcrText(pages) {
+  return pages.reduce((total, page) => total + Number(page.wordCount || wordCount(page.text)), 0) >= 120
+}
+
+function shouldUseVisionOcr() {
+  if (['tesseract', 'local', 'local-only'].includes(pdfOcrProvider)) return false
+  return Boolean(pdfOcrVisionBaseUrl && pdfOcrVisionApiKey && pdfOcrVisionModel)
+}
+
+async function ocrPdfPagesWithVision(buffer, maxPages) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-ocr-vision-'))
+  const pdfPath = path.join(tmpDir, 'source.pdf')
+  const pages = []
+  try {
+    await fs.writeFile(pdfPath, buffer)
+    for (let page = 1; page <= maxPages; page += 1) {
+      const imagePath = await renderPdfPage(pdfPath, tmpDir, page, pdfOcrVisionDpi)
+      try {
+        const text = normalizeOcrText(await runVisionOcr(imagePath))
+        if (wordCount(text) >= 20) pages.push({ num: page, text })
+      } finally {
+        await fs.rm(imagePath, { force: true }).catch(() => undefined)
+      }
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+  return pages
+}
+
+async function ocrPdfPagesWithTesseract(buffer, maxPages) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-ocr-'))
   const pdfPath = path.join(tmpDir, 'source.pdf')
   const pages = []
   try {
     await fs.writeFile(pdfPath, buffer)
     for (let page = 1; page <= maxPages; page += 1) {
-      const prefix = path.join(tmpDir, `page-${String(page).padStart(4, '0')}`)
-      const imagePath = `${prefix}.png`
-      await runOcrCommand('pdftoppm', [
-        '-f',
-        String(page),
-        '-l',
-        String(page),
-        '-r',
-        String(pdfOcrDpi),
-        '-png',
-        '-singlefile',
-        pdfPath,
-        prefix,
-      ])
-      const { stdout } = await runOcrCommand('tesseract', [imagePath, 'stdout', '-l', pdfOcrLanguage, '--psm', '3'])
-      const text = normalizeOcrText(stdout)
-      if (wordCount(text) >= 20) {
-        pages.push({
-          num: page,
-          text,
-        })
+      const imagePath = await renderPdfPage(pdfPath, tmpDir, page, pdfOcrDpi)
+      try {
+        const { stdout } = await runOcrCommand('tesseract', [imagePath, 'stdout', '-l', pdfOcrLanguage, '--psm', '3'])
+        const text = normalizeOcrText(stdout)
+        if (wordCount(text) >= 20) pages.push({ num: page, text })
+      } finally {
+        await fs.rm(imagePath, { force: true }).catch(() => undefined)
       }
-      await fs.rm(imagePath, { force: true }).catch(() => undefined)
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
   }
   return pages
+}
+
+async function renderPdfPage(pdfPath, tmpDir, page, dpi) {
+  const prefix = path.join(tmpDir, `page-${String(page).padStart(4, '0')}`)
+  const imagePath = `${prefix}.png`
+  await runOcrCommand('pdftoppm', [
+    '-f',
+    String(page),
+    '-l',
+    String(page),
+    '-r',
+    String(dpi),
+    '-png',
+    '-singlefile',
+    pdfPath,
+    prefix,
+  ])
+  return imagePath
+}
+
+async function runVisionOcr(imagePath) {
+  const imageBytes = await fs.readFile(imagePath)
+  const response = await fetch(`${pdfOcrVisionBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${pdfOcrVisionApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: pdfOcrVisionModel,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Read every visible English word in this scanned book page. Include body paragraphs, not only headings. Preserve reading order as much as possible. Return plain OCR text only. Do not summarize, translate, or explain.',
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${imageBytes.toString('base64')}`,
+              },
+            },
+          ],
+        },
+      ],
+      temperature: 0,
+      max_tokens: 4000,
+    }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`视觉 OCR 请求失败：${response.status} ${text.slice(0, 240)}`)
+  }
+
+  const data = await response.json()
+  return messageContentText(data?.choices?.[0]?.message?.content)
+}
+
+function messageContentText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => (typeof item === 'string' ? item : item?.text || item?.content || ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return ''
 }
 
 async function runOcrCommand(command, args) {
@@ -3505,8 +3624,12 @@ async function createApp() {
         maxEpubUploadMb: Math.round(maxEpubUploadBytes / 1024 / 1024),
         maxPdfUploadMb: Math.round(maxPdfUploadBytes / 1024 / 1024),
         pdfOcrEnabled,
+        pdfOcrProvider,
+        pdfOcrVisionConfigured: shouldUseVisionOcr(),
+        pdfOcrVisionModel,
         pdfOcrLanguage,
         pdfOcrDpi,
+        pdfOcrVisionDpi,
         pdfOcrMaxPages,
         rateLimitWindowMinutes: Math.round(rateLimitWindowMs / 60000),
         rateLimits: {

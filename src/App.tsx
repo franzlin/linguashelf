@@ -399,8 +399,12 @@ type SecurityStatus = {
     maxPodcastEpisodes: number
     maxActivePodcastJobs: number
     pdfOcrEnabled: boolean
+    pdfOcrProvider: string
+    pdfOcrVisionConfigured: boolean
+    pdfOcrVisionModel: string
     pdfOcrLanguage: string
     pdfOcrDpi: number
+    pdfOcrVisionDpi: number
     pdfOcrMaxPages: number
     activeJobs: number
   }
@@ -3247,7 +3251,17 @@ function SettingsView({
             <StatusItem label="AI 文本" ok={security.deployment.aiConfigured} value={security.deployment.aiConfigured ? '已配置' : '未配置'} />
             <StatusItem label="TTS" ok={security.deployment.ttsConfigured} value={security.deployment.ttsConfigured ? security.deployment.ttsProvider : '未配置'} />
             <StatusItem label="播客 TTS" ok={security.deployment.podcastTtsConfigured} value={security.deployment.podcastTtsConfigured ? 'Gemini' : '未配置'} />
-            <StatusItem label="PDF OCR" ok={security.deployment.pdfOcrEnabled} value={security.deployment.pdfOcrEnabled ? `${security.deployment.pdfOcrLanguage}/${security.deployment.pdfOcrDpi}dpi` : '关闭'} />
+            <StatusItem
+              label="PDF OCR"
+              ok={security.deployment.pdfOcrEnabled}
+              value={
+                security.deployment.pdfOcrEnabled
+                  ? security.deployment.pdfOcrVisionConfigured
+                    ? `Hunyuan 优先/${security.deployment.pdfOcrVisionDpi}dpi`
+                    : `本地 ${security.deployment.pdfOcrLanguage}/${security.deployment.pdfOcrDpi}dpi`
+                  : '关闭'
+              }
+            />
             <StatusItem label="会话" ok value={`${security.security.sessionDays} 天`} />
             <StatusItem label="任务" ok value={`${security.deployment.activeJobs} 个运行中`} />
           </div>

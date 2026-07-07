@@ -52,6 +52,12 @@ MAX_UPLOAD_MB=50
 MAX_EPUB_UPLOAD_MB=50
 MAX_PDF_UPLOAD_MB=50
 PDF_OCR_ENABLED=true
+PDF_OCR_PROVIDER=hunyuan-first
+PDF_OCR_VISION_MODEL=hunyuan-ocr
+PDF_OCR_VISION_BASE_URL=
+PDF_OCR_VISION_API_KEY=
+PDF_OCR_VISION_DPI=110
+PDF_OCR_VISION_MIN_WORDS=40
 PDF_OCR_LANGUAGE=eng
 PDF_OCR_DPI=220
 PDF_OCR_MAX_PAGES=120
@@ -110,7 +116,7 @@ GEMINI_TTS_VOICE=Kore
 - 文字版 PDF，建议 50MB 以内
 - 清晰的英文扫描版 PDF，会在原生文字抽取失败时自动 OCR
 
-OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
+OCR 会优先使用视觉模型 `hunyuan-ocr`，失败或识别正文太少时自动回退到本地 `tesseract-ocr`。如果未单独配置 `PDF_OCR_VISION_BASE_URL` / `PDF_OCR_VISION_API_KEY`，会复用 `GEMINI_TTS_BASE_URL` / `GEMINI_TTS_API_KEY`。本地兜底 OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
 
 解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；PDF 会优先抽取可复制文字，失败时使用 OCR，并自动清理重复页眉页脚、页码，再用章节标题启发式拆分。
 
