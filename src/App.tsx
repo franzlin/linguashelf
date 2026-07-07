@@ -423,6 +423,10 @@ type SecurityStatus = {
     ttsProvider: string
     podcastTtsConfigured: boolean
     podcastTtsPrimary?: string
+    podcastTtsInputTokenLimit?: number
+    podcastTtsOutputTokenLimit?: number
+    podcastTtsChunkTokens?: number
+    podcastTtsChunkChars?: number
     maxUnitsPerBook: number
     maxPodcastEpisodes: number
     maxActivePodcastJobs: number
@@ -3421,6 +3425,16 @@ function SettingsView({
               label="播客 TTS"
               ok={security.deployment.podcastTtsConfigured}
               value={security.deployment.podcastTtsConfigured ? security.deployment.podcastTtsPrimary || 'Gemini' : '未配置'}
+            />
+            <StatusItem
+              label="TTS 分块"
+              ok
+              value={`${formatNumber(security.deployment.podcastTtsChunkChars || 0)} 字 / ${formatNumber(security.deployment.podcastTtsChunkTokens || 0)} tokens`}
+            />
+            <StatusItem
+              label="TTS 限制"
+              ok
+              value={`${formatNumber(security.deployment.podcastTtsInputTokenLimit || 0)} in / ${formatNumber(security.deployment.podcastTtsOutputTokenLimit || 0)} out`}
             />
             <StatusItem
               label="PDF OCR"

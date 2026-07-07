@@ -54,7 +54,11 @@ const podcastLexileMin = 500
 const podcastLexileMax = 1500
 const maxPodcastEpisodes = Number(process.env.MAX_PODCAST_EPISODES || 12)
 const maxActivePodcastJobs = Number(process.env.MAX_ACTIVE_PODCAST_JOBS || 2)
-const podcastTtsChunkChars = Number(process.env.PODCAST_TTS_CHUNK_CHARS || 2500)
+const geminiTtsInputTokenLimit = Math.max(1024, Number(process.env.GEMINI_TTS_INPUT_TOKEN_LIMIT || 8192))
+const geminiTtsOutputTokenLimit = Math.max(1024, Number(process.env.GEMINI_TTS_OUTPUT_TOKEN_LIMIT || 16384))
+const defaultPodcastTtsChunkTokens = Math.min(5500, Math.max(512, geminiTtsInputTokenLimit - 512))
+const podcastTtsChunkTokens = Math.max(512, Math.min(geminiTtsInputTokenLimit - 256, Number(process.env.PODCAST_TTS_CHUNK_TOKENS || defaultPodcastTtsChunkTokens)))
+const podcastTtsChunkChars = Math.min(20_000, Math.max(1200, Number(process.env.PODCAST_TTS_CHUNK_CHARS || 8000)))
 const podcastTtsConcurrency = Number(process.env.PODCAST_TTS_CONCURRENCY || 2)
 const podcastAudioFormat = String(process.env.PODCAST_AUDIO_FORMAT || 'mp3').toLowerCase()
 const podcastMp3Kbps = Number(process.env.PODCAST_MP3_KBPS || 64)
@@ -74,6 +78,7 @@ const aiRateLimits = {
 }
 const loginAttempts = new Map()
 const actionRateBuckets = new Map()
+const geminiTtsProviderCooldowns = new Map()
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
 
 const upload = multer({
@@ -2059,23 +2064,64 @@ async function deletePodcastAudioFiles(podcast) {
   }
 }
 
-function chunkTextForTts(text, maxChars = podcastTtsChunkChars) {
+function estimateTtsInputTokens(text) {
+  const value = String(text || '').trim()
+  if (!value) return 0
+  const cjkChars = value.match(/[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/g)?.length || 0
+  const words = value.match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g)?.length || 0
+  const nonCjkChars = Math.max(0, value.length - cjkChars)
+  return Math.ceil(words * 1.35 + cjkChars + nonCjkChars / 12)
+}
+
+function fitsTtsChunk(text, maxChars, maxTokens) {
+  const value = String(text || '').trim()
+  return value.length <= maxChars && estimateTtsInputTokens(value) <= maxTokens
+}
+
+function splitOversizedTtsChunk(text, maxChars, maxTokens) {
+  const chunks = []
+  let current = ''
+  const pieces = String(text || '').match(/\S+\s*/g) || []
+  for (const piece of pieces) {
+    const candidate = `${current}${piece}`.trim()
+    if (current && !fitsTtsChunk(candidate, maxChars, maxTokens)) {
+      chunks.push(current.trim())
+      current = piece.trim()
+    } else {
+      current = candidate
+    }
+
+    while (current && !fitsTtsChunk(current, maxChars, maxTokens)) {
+      const hardLimit = Math.max(1, Math.min(maxChars, Math.floor(current.length * 0.8)))
+      let sliceAt = current.lastIndexOf(' ', hardLimit)
+      if (sliceAt < Math.floor(hardLimit * 0.6)) sliceAt = hardLimit
+      chunks.push(current.slice(0, sliceAt).trim())
+      current = current.slice(sliceAt).trim()
+    }
+  }
+  if (current.trim()) chunks.push(current.trim())
+  return chunks.filter(Boolean)
+}
+
+function chunkTextForTts(text, maxChars = podcastTtsChunkChars, maxTokens = podcastTtsChunkTokens) {
   const sentences = String(text || '').replace(/\s+/g, ' ').match(/[^.!?]+[.!?]+|\S+$/g) || []
   const chunks = []
   let current = ''
   for (const sentence of sentences) {
     const value = sentence.trim()
     if (!value) continue
-    if (current && current.length + 1 + value.length > maxChars) {
+    if (!fitsTtsChunk(value, maxChars, maxTokens)) {
+      if (current) chunks.push(current)
+      chunks.push(...splitOversizedTtsChunk(value, maxChars, maxTokens))
+      current = ''
+      continue
+    }
+    const candidate = current ? `${current} ${value}` : value
+    if (current && !fitsTtsChunk(candidate, maxChars, maxTokens)) {
       chunks.push(current)
       current = value
     } else {
-      current = current ? `${current} ${value}` : value
-    }
-    while (current.length > maxChars) {
-      const sliceAt = Math.max(current.lastIndexOf(' ', maxChars), Math.floor(maxChars * 0.8))
-      chunks.push(current.slice(0, sliceAt).trim())
-      current = current.slice(sliceAt).trim()
+      current = candidate
     }
   }
   if (current.trim()) chunks.push(current.trim())
@@ -2093,6 +2139,14 @@ function geminiTtsApiUrl(baseUrl, model) {
   return `${apiBase}/models/${model}:generateContent`
 }
 
+function geminiTtsProviderKey(provider) {
+  return `${provider.name}:${provider.model}:${provider.baseUrl}`
+}
+
+function isGeminiLocationUnsupported(message) {
+  return /location is not supported|user location|FAILED_PRECONDITION/i.test(String(message || ''))
+}
+
 function geminiTtsProviders() {
   const officialKey = String(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || '').trim()
   const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
@@ -2104,6 +2158,7 @@ function geminiTtsProviders() {
       baseUrl: process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com',
       apiKey: officialKey,
       model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
+      maxInputTokens: geminiTtsInputTokenLimit,
       official: true,
     })
   }
@@ -2114,13 +2169,19 @@ function geminiTtsProviders() {
       baseUrl: process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top',
       apiKey: fallbackKey,
       model: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+      maxInputTokens: Number(process.env.GEMINI_TTS_FALLBACK_INPUT_TOKEN_LIMIT || geminiTtsInputTokenLimit),
       official: /generativelanguage\.googleapis\.com/i.test(process.env.GEMINI_TTS_BASE_URL || ''),
     })
   }
-  return providers
+  const now = Date.now()
+  return providers.filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
 }
 
 async function requestGeminiTtsChunk(provider, text, voiceName) {
+  const estimatedTokens = estimateTtsInputTokens(text)
+  if (estimatedTokens > provider.maxInputTokens) {
+    throw new Error(`${provider.label} 文本块超过输入 token 限制：约 ${estimatedTokens}/${provider.maxInputTokens}`)
+  }
   const headers = {
     'Content-Type': 'application/json',
     'X-goog-api-key': provider.apiKey,
@@ -2166,8 +2227,12 @@ async function geminiTtsChunk(text, voiceName) {
     try {
       return await requestGeminiTtsChunk(item, text, voiceName)
     } catch (error) {
-      errors.push(error?.message || String(error))
-      console.warn(`Gemini TTS provider failed, trying fallback: ${error?.message || error}`)
+      const message = error?.message || String(error)
+      errors.push(message)
+      if (item.official && isGeminiLocationUnsupported(message)) {
+        geminiTtsProviderCooldowns.set(geminiTtsProviderKey(item), Date.now() + 60 * 60 * 1000)
+      }
+      console.warn(`Gemini TTS provider failed, trying fallback: ${message}`)
     }
   }
   throw new Error(`Gemini TTS 全部来源失败：${errors.join(' | ')}`)
@@ -3889,6 +3954,10 @@ async function createApp() {
         ttsProvider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
         podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_TTS_API_KEY),
         podcastTtsPrimary: process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview' : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+        podcastTtsInputTokenLimit: geminiTtsInputTokenLimit,
+        podcastTtsOutputTokenLimit: geminiTtsOutputTokenLimit,
+        podcastTtsChunkTokens,
+        podcastTtsChunkChars,
         maxUnitsPerBook: Number(process.env.MAX_UNITS_PER_BOOK || 240),
         maxPodcastEpisodes,
         maxActivePodcastJobs,
