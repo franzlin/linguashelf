@@ -2143,8 +2143,10 @@ function geminiTtsProviderKey(provider) {
   return `${provider.name}:${provider.model}:${provider.baseUrl}`
 }
 
-function isGeminiLocationUnsupported(message) {
-  return /location is not supported|user location|FAILED_PRECONDITION/i.test(String(message || ''))
+function shouldCooldownOfficialGeminiTts(message) {
+  return /location is not supported|user location|FAILED_PRECONDITION|RESOURCE_EXHAUSTED|prepayment credits|quota|rate limit|status 429/i.test(
+    String(message || '')
+  )
 }
 
 function geminiTtsProviders() {
@@ -2229,7 +2231,7 @@ async function geminiTtsChunk(text, voiceName) {
     } catch (error) {
       const message = error?.message || String(error)
       errors.push(message)
-      if (item.official && isGeminiLocationUnsupported(message)) {
+      if (item.official && shouldCooldownOfficialGeminiTts(message)) {
         geminiTtsProviderCooldowns.set(geminiTtsProviderKey(item), Date.now() + 60 * 60 * 1000)
       }
       console.warn(`Gemini TTS provider failed, trying fallback: ${message}`)
