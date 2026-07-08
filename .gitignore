@@ -32,3 +32,5 @@ outputs
 *.njsproj
 *.sln
 *.sw?
+
+.codex-tools/
