@@ -1,22 +1,28 @@
 :root {
-  --bg: #f4f7f2;
+  --bg: #faf9f6;
   --surface: #ffffff;
-  --surface-2: #eef4ef;
-  --ink: #17211f;
-  --muted: #61716b;
-  --line: #d8e0db;
-  --green: #0f766e;
-  --green-2: #d8f1ec;
-  --rust: #b75d35;
-  --rust-2: #fae8dd;
-  --blue: #315c8a;
-  --blue-2: #e4edf7;
+  --surface-2: #f4f3f1;
+  --surface-3: #efeeeb;
+  --ink: #1a1c1a;
+  --muted: #414844;
+  --soft-muted: #717973;
+  --line: #cfd8d1;
+  --line-soft: #e3e2e0;
+  --green: #1b4332;
+  --green-2: #dcefe4;
+  --green-3: #c1ecd4;
+  --rust: #76320f;
+  --rust-2: #ffdbcd;
+  --blue: #36485b;
+  --blue-2: #d1e4fb;
   --danger: #b42318;
   --danger-2: #fee4df;
-  --shadow: 0 16px 40px rgba(24, 37, 33, 0.08);
+  --shadow: 0 1px 2px rgba(26, 28, 26, 0.06);
+  --shadow-raised: 0 12px 30px rgba(26, 28, 26, 0.08);
+  --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  --font-serif: "Source Serif Pro", "Noto Serif SC", "Songti SC", "STSong", Georgia, "Times New Roman", serif;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Microsoft YaHei", sans-serif;
+    var(--font-ui);
   color: var(--ink);
   background: var(--bg);
   font-synthesis: none;
@@ -57,18 +63,23 @@ p {
 }
 
 h1 {
-  font-size: 2rem;
-  line-height: 1.15;
+  font-family: var(--font-serif);
+  font-size: 2.15rem;
+  line-height: 1.16;
+  color: var(--green);
+  font-weight: 760;
 }
 
 h2 {
-  font-size: 1.15rem;
+  font-size: 1.18rem;
   line-height: 1.25;
+  color: var(--ink);
 }
 
 h3 {
   font-size: 1rem;
   line-height: 1.35;
+  color: var(--ink);
 }
 
 p {
@@ -98,12 +109,13 @@ p {
   position: sticky;
   top: 0;
   height: 100vh;
-  padding: 22px 18px;
-  background: #18251f;
-  color: #f8fbf8;
+  padding: 42px 24px;
+  background: var(--surface);
+  color: var(--green);
+  border-right: 1px solid var(--line-soft);
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 30px;
 }
 
 .sidebar-brand,
@@ -115,41 +127,45 @@ p {
 
 .sidebar-brand {
   height: 44px;
-  font-weight: 760;
+  font-family: var(--font-serif);
+  font-size: 1.6rem;
+  font-weight: 780;
 }
 
 .brand-mark {
   width: 48px;
   height: 48px;
   justify-content: center;
-  color: #ffffff;
-  background: var(--green);
+  color: var(--green);
+  background: var(--green-2);
   border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--green) 20%, var(--line));
 }
 
 .side-nav {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .side-nav button,
 .sidebar-user button {
-  min-height: 44px;
+  min-height: 46px;
   border: 0;
   border-radius: 8px;
   padding: 0 12px;
   display: flex;
   align-items: center;
   gap: 10px;
-  color: #d8e7df;
+  color: var(--muted);
   background: transparent;
   text-align: left;
+  font-weight: 650;
 }
 
 .side-nav button.active,
 .side-nav button:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.12);
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-3) 35%, transparent);
 }
 
 .sidebar-user {
@@ -159,18 +175,19 @@ p {
 }
 
 .sidebar-user span {
-  color: #bad0c7;
+  color: var(--soft-muted);
   font-size: 0.9rem;
   overflow-wrap: anywhere;
 }
 
 .sidebar-user button {
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  background: var(--surface-2);
 }
 
 .workspace {
   min-width: 0;
-  padding: 28px;
+  padding: 34px;
   padding-bottom: 92px;
 }
 
@@ -178,7 +195,7 @@ p {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
 .topbar h2 {
@@ -206,7 +223,7 @@ p {
 }
 
 .page-section {
-  padding: 24px;
+  padding: 26px;
 }
 
 .section-head,
@@ -227,6 +244,7 @@ p {
 .section-head p,
 .detail-head p {
   margin-top: 6px;
+  color: var(--soft-muted);
 }
 
 .book-title-line,
@@ -347,24 +365,27 @@ p {
 .primary-button {
   color: #ffffff;
   background: var(--green);
+  box-shadow: var(--shadow);
 }
 
 .primary-button:hover {
-  background: #0b665f;
+  background: #274e3d;
 }
 
 .secondary-button {
   color: var(--green);
   background: var(--green-2);
+  border: 1px solid color-mix(in srgb, var(--green) 18%, var(--line));
 }
 
 .secondary-button:hover {
-  background: #c6ebe4;
+  background: var(--green-3);
 }
 
 .ghost-button {
   color: var(--ink);
   background: var(--surface-2);
+  border: 1px solid var(--line-soft);
 }
 
 .topbar-actions {
@@ -449,7 +470,7 @@ p {
   border-radius: 8px;
   background: var(--surface);
   border: 1px solid var(--line);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-raised);
 }
 
 .login-panel h1 {
@@ -493,14 +514,14 @@ p {
 
 .empty-state {
   min-height: 280px;
-  border: 1px dashed #bac9c1;
+  border: 1px dashed color-mix(in srgb, var(--green) 28%, var(--line));
   border-radius: 8px;
   display: grid;
   place-items: center;
   align-content: center;
   gap: 10px;
   text-align: center;
-  background: #fbfcfb;
+  background: var(--surface-2);
 }
 
 .book-grid,
@@ -533,10 +554,10 @@ p {
 
 .insight-card {
   min-width: 0;
-  padding: 16px;
+  padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface);
   display: grid;
   gap: 14px;
   align-content: space-between;
@@ -554,10 +575,10 @@ p {
 
 .continue-panel {
   min-height: 220px;
-  padding: 24px;
+  padding: 28px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: linear-gradient(180deg, #ffffff 0%, var(--surface-2) 100%);
   box-shadow: var(--shadow);
   display: grid;
   align-content: space-between;
@@ -593,7 +614,7 @@ p {
   border-radius: 8px;
   padding: 12px;
   color: var(--ink);
-  background: #fbfcfb;
+  background: var(--surface);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
@@ -623,7 +644,7 @@ p {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
-  background: #ffffff;
+  background: var(--surface);
   display: grid;
   gap: 12px;
 }
@@ -730,13 +751,14 @@ p {
 .setting-row {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .book-card {
   padding: 18px;
   display: grid;
   gap: 14px;
+  box-shadow: var(--shadow);
 }
 
 .book-card h2,
@@ -756,7 +778,8 @@ p {
 
 .book-type {
   color: var(--blue);
-  background: var(--blue-2);
+  background: color-mix(in srgb, var(--blue-2) 70%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--blue) 12%, transparent);
 }
 
 .book-meta,
@@ -772,13 +795,13 @@ p {
   height: 8px;
   border-radius: 999px;
   overflow: hidden;
-  background: var(--surface-2);
+  background: var(--surface-3);
 }
 
 .progress-line span {
   display: block;
   height: 100%;
-  background: var(--rust);
+  background: var(--green);
 }
 
 .stat-row,
@@ -793,6 +816,7 @@ p {
   min-height: 82px;
   padding: 14px;
   border-radius: 8px;
+  border: 1px solid var(--line-soft);
   background: var(--surface-2);
   display: grid;
   align-content: center;
@@ -805,7 +829,9 @@ p {
 }
 
 .stat strong {
-  font-size: 1.3rem;
+  color: var(--green);
+  font-family: var(--font-serif);
+  font-size: 1.38rem;
 }
 
 .dashboard-page {
@@ -818,6 +844,7 @@ p {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  background: var(--surface);
 }
 
 .dashboard-hero h1 {
@@ -830,10 +857,10 @@ p {
 
 .metric-card {
   min-height: 132px;
-  padding: 16px;
+  padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface);
   box-shadow: var(--shadow);
   display: grid;
   align-content: center;
@@ -846,7 +873,9 @@ p {
 }
 
 .metric-card strong {
-  font-size: 1.35rem;
+  color: var(--green);
+  font-family: var(--font-serif);
+  font-size: 1.48rem;
 }
 
 .metric-icon {
@@ -854,7 +883,7 @@ p {
   height: 34px;
   border-radius: 8px;
   color: var(--green);
-  background: var(--green-2);
+  background: color-mix(in srgb, var(--green-3) 55%, #ffffff);
   display: grid;
   place-items: center;
 }
@@ -922,7 +951,7 @@ p {
   padding: 10px 12px;
   border-radius: 8px;
   color: var(--green);
-  background: var(--green-2);
+  background: color-mix(in srgb, var(--green-3) 42%, #ffffff);
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -933,7 +962,7 @@ p {
   height: 12px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--surface-3);
 }
 
 .goal-progress span {
@@ -1038,10 +1067,11 @@ p {
 }
 
 .podcast-section {
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  padding: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px;
   margin: 4px 0 18px;
+  background: var(--surface-2);
   display: grid;
   gap: 14px;
 }
@@ -1077,10 +1107,11 @@ p {
   grid-template-columns: 56px minmax(0, 1fr) auto;
   align-items: start;
   gap: 14px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .podcast-main {
@@ -1129,7 +1160,7 @@ p {
   padding: 5px 9px;
   border-radius: 8px;
   color: var(--muted);
-  background: var(--surface-2);
+  background: var(--surface);
   font-size: 0.84rem;
   font-weight: 680;
 }
@@ -1140,6 +1171,7 @@ p {
   border-radius: 8px;
   color: var(--blue);
   background: var(--blue-2);
+  border: 1px solid color-mix(in srgb, var(--blue) 12%, transparent);
 }
 
 .tts-source-chip.muted {
@@ -1177,6 +1209,7 @@ p {
   padding: 12px;
   border-radius: 8px;
   margin-bottom: 16px;
+  border: 1px solid var(--line-soft);
   background: var(--surface-2);
 }
 
@@ -1241,6 +1274,8 @@ p {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .unit-index {
@@ -1248,9 +1283,9 @@ p {
   height: 44px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 999px;
   color: var(--green);
-  background: var(--green-2);
+  background: color-mix(in srgb, var(--green-3) 48%, #ffffff);
   font-weight: 800;
 }
 
@@ -1262,17 +1297,17 @@ p {
 
 .status-pill.planned {
   color: var(--rust);
-  background: var(--rust-2);
+  background: color-mix(in srgb, var(--rust-2) 70%, #ffffff);
 }
 
 .status-pill.generated {
   color: var(--blue);
-  background: var(--blue-2);
+  background: color-mix(in srgb, var(--blue-2) 72%, #ffffff);
 }
 
 .status-pill.completed {
   color: var(--green);
-  background: var(--green-2);
+  background: color-mix(in srgb, var(--green-3) 45%, #ffffff);
 }
 
 .status-pill.queued,
@@ -1284,7 +1319,7 @@ p {
 
 .status-pill.succeeded {
   color: var(--green);
-  background: var(--green-2);
+  background: color-mix(in srgb, var(--green-3) 45%, #ffffff);
 }
 
 .status-pill.failed,
@@ -1304,13 +1339,13 @@ p {
 
 .study-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 22px;
   align-items: start;
 }
 
 .study-main {
-  padding: 24px;
+  padding: 30px;
   min-width: 0;
 }
 
@@ -1320,6 +1355,7 @@ p {
   padding: 18px;
   display: grid;
   gap: 14px;
+  background: var(--surface);
 }
 
 .assist-panel h3 {
@@ -1329,8 +1365,8 @@ p {
 .source-box,
 .learning-block {
   border-top: 1px solid var(--line);
-  padding-top: 22px;
-  margin-top: 22px;
+  padding-top: 24px;
+  margin-top: 24px;
 }
 
 .source-box summary,
@@ -1348,7 +1384,7 @@ p {
   margin-top: 10px;
   padding: 14px;
   border-radius: 8px;
-  background: #fbfcfb;
+  background: var(--surface-2);
 }
 
 .concept-grid {
@@ -1364,7 +1400,7 @@ p {
   border-radius: 8px;
   padding: 14px;
   text-align: left;
-  background: #fbfcfb;
+  background: var(--surface-2);
   display: grid;
   gap: 8px;
 }
@@ -1401,11 +1437,11 @@ p {
 
 .reading-block {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .reading-paragraph {
-  padding: 16px;
+  padding: 18px 20px;
 }
 
 .reading-paragraph.needs-review {
@@ -1419,14 +1455,14 @@ p {
 }
 
 .reading-paragraph.seen {
-  background: #fbfcfb;
+  background: var(--surface-2);
 }
 
 .reading-paragraph p {
   color: var(--ink);
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 1.08rem;
-  line-height: 1.85;
+  font-family: var(--font-serif);
+  font-size: 1.12rem;
+  line-height: 1.9;
 }
 
 .sentence {
@@ -1434,7 +1470,7 @@ p {
 }
 
 .sentence:hover {
-  background: #fff4e9;
+  background: color-mix(in srgb, var(--rust-2) 45%, transparent);
 }
 
 .sentence.suspicious {
@@ -1453,13 +1489,15 @@ p {
   line-height: inherit;
   text-decoration: underline;
   text-decoration-color: transparent;
-  text-underline-offset: 4px;
+  text-underline-offset: 5px;
+  transition: color 0.14s ease, text-decoration-color 0.14s ease, background 0.14s ease;
 }
 
 .word-token:hover,
 .word-token.known {
   color: var(--green);
   text-decoration-color: var(--green);
+  background: color-mix(in srgb, var(--green-3) 30%, transparent);
 }
 
 .summary-button {
@@ -2193,7 +2231,7 @@ p {
 
   .workspace {
     padding: 18px;
-    padding-bottom: 124px;
+    padding-bottom: 132px;
   }
 
   .topbar {
@@ -2201,18 +2239,23 @@ p {
   }
 
   .mobile-nav {
-    position: static;
-    min-height: 64px;
-    margin-bottom: 18px;
+    position: fixed;
+    left: 6px;
+    right: 6px;
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    z-index: 40;
+    min-height: 62px;
+    margin-bottom: 0;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: #ffffff;
-    box-shadow: var(--shadow);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    box-shadow: var(--shadow-raised);
     display: grid;
-    grid-template-columns: repeat(9, minmax(58px, 1fr));
-    gap: 4px;
-    padding: 6px;
-    overflow-x: auto;
+    grid-template-columns: repeat(9, minmax(28px, 1fr));
+    gap: 2px;
+    padding: 4px;
+    overflow: hidden;
+    backdrop-filter: blur(12px);
   }
 
   .mobile-nav button {
@@ -2223,12 +2266,26 @@ p {
     display: grid;
     place-items: center;
     gap: 2px;
-    font-size: 0.72rem;
+    font-size: 0.66rem;
+    line-height: 1.1;
+    min-width: 0;
+  }
+
+  .mobile-nav button svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .mobile-nav button span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
   }
 
   .mobile-nav button.active {
     color: var(--green);
-    background: var(--green-2);
+    background: color-mix(in srgb, var(--green-3) 42%, #ffffff);
   }
 
   .section-head,
