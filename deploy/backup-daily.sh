@@ -8,6 +8,13 @@ RUN_RESTORE_DRILL="${RUN_RESTORE_DRILL:-1}"
 
 cd "$APP_DIR"
 
+if [ -z "${BACKUP_ENCRYPTION_KEY:-}" ] && [ -f .env ]; then
+  env_key="$(grep -E '^BACKUP_ENCRYPTION_KEY=' .env | tail -n 1 | cut -d= -f2-)"
+  if [ -n "$env_key" ]; then
+    export BACKUP_ENCRYPTION_KEY="$env_key"
+  fi
+fi
+
 mkdir -p "$HOST_BACKUP_DIR"
 chmod 700 "$HOST_BACKUP_DIR"
 
