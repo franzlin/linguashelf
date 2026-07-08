@@ -2228,7 +2228,9 @@ function geminiTtsProviders() {
 }
 
 async function requestGeminiTtsChunk(provider, text, voiceName) {
-  const estimatedTokens = estimateTtsInputTokens(text)
+  const instruction = podcastTtsInstruction(provider)
+  const input = `${instruction}\n\n${text}`
+  const estimatedTokens = estimateTtsInputTokens(input)
   if (estimatedTokens > provider.maxInputTokens) {
     throw new Error(`${provider.label} 文本块超过输入 token 限制：约 ${estimatedTokens}/${provider.maxInputTokens}`)
   }
@@ -2242,7 +2244,7 @@ async function requestGeminiTtsChunk(provider, text, voiceName) {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts: [{ text: input }] }],
       generationConfig: {
         responseModalities: ['AUDIO'],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' } } },
@@ -2261,8 +2263,34 @@ async function requestGeminiTtsChunk(provider, text, voiceName) {
     pcm: Buffer.from(inlineData.data, 'base64'),
     provider: provider.label,
     model: provider.model,
+    promptProfile: provider.name === 'official-gemini' ? 'gemini-3.1-podcast-director' : 'gemini-tts-fallback-clear',
     mimeType: inlineData.mimeType || inlineData.mime_type || '',
   }
+}
+
+function podcastTtsInstruction(provider) {
+  if (provider?.name === 'official-gemini') {
+    return (
+      process.env.GEMINI_TTS_31_INSTRUCTIONS ||
+      `You are narrating a serious single-host knowledge podcast for an adult Chinese learner of English.
+Use a natural, professional audiobook voice: calm, warm, intelligent, and human.
+Keep normal speed. Do not slow down artificially, because the material is already adapted for the learner.
+Use subtle emphasis for historical, political, and economic concepts, but avoid theatrical acting.
+Make sentence endings natural, with small rises for guiding questions and confident falls for conclusions.
+Add short, natural pauses after dense ideas, transitions, names, dates, and lists of two or three key points.
+Pronounce names, places, and institutions carefully and consistently.
+Keep the tone faithful to the source: documentary, thoughtful, and precise. Do not add jokes, extra comments, or new facts.
+Read the script exactly as written, but use prosody to make the structure clear.`
+    )
+  }
+
+  return (
+    process.env.GEMINI_TTS_FALLBACK_INSTRUCTIONS ||
+    `Read in a clear, natural audiobook style for an adult English learner.
+Use normal speed, careful articulation, and natural pauses.
+Keep the tone warm, steady, and professional.
+Do not sound robotic. Do not add extra words.`
+  )
 }
 
 async function geminiTtsChunk(text, voiceName) {
@@ -2297,6 +2325,7 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
   const pcmParts = new Array(chunks.length)
   const usedProviders = new Set()
   const usedModels = new Set()
+  const usedPromptProfiles = new Set()
   let cursor = 0
   let done = 0
 
@@ -2304,11 +2333,11 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     while (cursor < chunks.length) {
       const index = cursor
       cursor += 1
-      const instruction = 'Read in a warm, patient, encouraging teacher voice for an adult English learner. Use clear articulation, normal speed, and natural pauses.\n\n'
-      const result = await geminiTtsChunk(`${instruction}${chunks[index]}`, voice)
+      const result = await geminiTtsChunk(chunks[index], voice)
       pcmParts[index] = result.pcm
       if (result.provider) usedProviders.add(result.provider)
       if (result.model) usedModels.add(result.model)
+      if (result.promptProfile) usedPromptProfiles.add(result.promptProfile)
       done += 1
       await onProgress(Math.round((done / chunks.length) * 100), done, chunks.length)
     }
@@ -2333,6 +2362,7 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     voice,
     provider: Array.from(usedProviders).join(' + '),
     model: Array.from(usedModels).join(' + '),
+    promptProfile: Array.from(usedPromptProfiles).join(' + '),
     durationSeconds: audioFile.durationSeconds,
     chunkCount: chunks.length,
     generatedAt: new Date().toISOString(),

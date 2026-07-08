@@ -278,6 +278,7 @@ type Podcast = {
     voice: string
     provider?: string
     model?: string
+    promptProfile?: string
     durationSeconds: number
     chunkCount: number
     generatedAt: string
@@ -599,6 +600,13 @@ function podcastKindFromLabel(label: string): PodcastKind {
 
 function podcastKindLabel(kind?: string) {
   return podcastKindLabels[normalizePodcastKind(kind)]
+}
+
+function podcastPromptProfileLabel(profile?: string) {
+  if (!profile) return ''
+  if (profile.includes('gemini-3.1-podcast-director')) return '3.1 播客导演'
+  if (profile.includes('gemini-tts-fallback-clear')) return '兜底清晰朗读'
+  return profile
 }
 
 function sortPodcastList(items: Podcast[]) {
@@ -2291,6 +2299,7 @@ function BookView({
                         {podcastTtsLabel}
                       </span>
                       {podcast.audio?.model && <span>模型 {podcast.audio.model}</span>}
+                      {podcast.audio?.promptProfile && <span>朗读策略 {podcastPromptProfileLabel(podcast.audio.promptProfile)}</span>}
                       {podcast.progress?.positionSeconds ? <span>已听 {formatDuration(podcast.progress.positionSeconds)}</span> : null}
                     </div>
                     {busy && <div className="progress-line task-progress"><span style={{ width: `${progress}%` }} /></div>}

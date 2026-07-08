@@ -78,6 +78,8 @@ GEMINI_TTS_BASE_URL=https://api.futureppo.top
 GEMINI_TTS_API_KEY=
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
 GEMINI_TTS_VOICE=Kore
+GEMINI_TTS_31_INSTRUCTIONS=
+GEMINI_TTS_FALLBACK_INSTRUCTIONS=
 PODCAST_LEXILE_DEFAULT=900
 PODCAST_SOURCE_WORDS_PER_EPISODE=2200
 MAX_PODCAST_EPISODES=12
@@ -118,11 +120,13 @@ GEMINI_TTS_BASE_URL=https://api.futureppo.top
 GEMINI_TTS_API_KEY=你的 Gemini TTS 兜底渠道 key
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
 GEMINI_TTS_VOICE=Kore
+GEMINI_TTS_31_INSTRUCTIONS=可选：覆盖 3.1 专属播客导演朗读指令
+GEMINI_TTS_FALLBACK_INSTRUCTIONS=可选：覆盖 2.5 兜底清晰朗读指令
 PODCAST_TTS_CHUNK_TOKENS=5500
 PODCAST_TTS_CHUNK_CHARS=8000
 ```
 
-设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。`GEMINI_TTS_OFFICIAL_*` 保留为兼容变量名，实际表示“播客 TTS 主来源”，可以指向 Yunwu 等 Gemini 兼容网关，不需要使用 Google 官方 key。Gemini 3.1 主来源的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。主来源支持配置多个 key，系统会按音频分块轮流使用；某条 key 额度耗尽、限流或地区不可用时，只会临时冷却那一条。
+设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。`GEMINI_TTS_OFFICIAL_*` 保留为兼容变量名，实际表示“播客 TTS 主来源”，可以指向 Yunwu 等 Gemini 兼容网关，不需要使用 Google 官方 key。Gemini 3.1 主来源会使用专属“播客导演”朗读指令，更强调知识型单人播客的自然停顿、概念重音、纪录片式语气和忠实朗读；2.5 兜底来源会使用更短的“清晰自然朗读”指令，优先稳定。可用 `GEMINI_TTS_31_INSTRUCTIONS` / `GEMINI_TTS_FALLBACK_INSTRUCTIONS` 覆盖默认指令。Gemini 3.1 主来源的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。主来源支持配置多个 key，系统会按音频分块轮流使用；某条 key 额度耗尽、限流或地区不可用时，只会临时冷却那一条。
 
 导航里的“服务”页会展示文本生成、听力预热 TTS、播客 TTS 主来源/兜底、视觉 OCR、本地 OCR 的配置摘要和最近检查结果。服务页不会显示 API key；点击“测试”会发起一次轻量检查，默认由 `RATE_LIMIT_SERVICE_TEST_MAX` 限制每个用户每小时最多测试 12 次。
 
