@@ -68,7 +68,8 @@ RATE_LIMIT_WINDOW_MINUTES=60
 RATE_LIMIT_GENERATE_UNITS_MAX=20
 RATE_LIMIT_DEFINITIONS_MAX=120
 RATE_LIMIT_AUDIO_MAX=30
-GEMINI_TTS_OFFICIAL_BASE_URL=https://generativelanguage.googleapis.com
+RATE_LIMIT_SERVICE_TEST_MAX=12
+GEMINI_TTS_OFFICIAL_BASE_URL=https://yunwu.ai
 GEMINI_TTS_OFFICIAL_API_KEY=
 GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_INPUT_TOKEN_LIMIT=8192
@@ -108,7 +109,7 @@ OPENAI_TTS_API_KEY=你的语音网关 key
 书籍详情页支持生成四种单人英语播客：读前导入、读后复盘、全书专题、全书分集讲解。脚本使用文本模型生成，音频使用 Gemini TTS，默认输出 MP3 并缓存在 `data/audio`。播客 TTS 会优先使用 Gemini 3.1 主来源；如果主来源失败，会自动回退到兼容渠道的 2.5 Flash TTS。
 
 ```bash
-GEMINI_TTS_OFFICIAL_BASE_URL=https://generativelanguage.googleapis.com
+GEMINI_TTS_OFFICIAL_BASE_URL=https://yunwu.ai
 GEMINI_TTS_OFFICIAL_API_KEY=你的 Gemini 3.1 主来源 key，多个 key 用英文逗号分隔
 GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_INPUT_TOKEN_LIMIT=8192
@@ -121,7 +122,9 @@ PODCAST_TTS_CHUNK_TOKENS=5500
 PODCAST_TTS_CHUNK_CHARS=8000
 ```
 
-设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。Gemini 3.1 主来源的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。主来源支持配置多个 key，系统会按音频分块轮流使用；某条 key 额度耗尽、限流或地区不可用时，只会临时冷却那一条。
+设置页可以调整播客 Lexile 难度和音色。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。播客默认输出 MP3（64kbps），如果编码失败会自动退回 WAV。`GEMINI_TTS_OFFICIAL_*` 保留为兼容变量名，实际表示“播客 TTS 主来源”，可以指向 Yunwu 等 Gemini 兼容网关，不需要使用 Google 官方 key。Gemini 3.1 主来源的输入上限按 8192 token、输出上限按 16384 token 配置；实际分块默认控制在约 5500 估算 token 或 8000 字符以内，给朗读指令和估算误差留余量。主来源支持配置多个 key，系统会按音频分块轮流使用；某条 key 额度耗尽、限流或地区不可用时，只会临时冷却那一条。
+
+导航里的“服务”页会展示文本生成、听力预热 TTS、播客 TTS 主来源/兜底、视觉 OCR、本地 OCR 的配置摘要和最近检查结果。服务页不会显示 API key；点击“测试”会发起一次轻量检查，默认由 `RATE_LIMIT_SERVICE_TEST_MAX` 限制每个用户每小时最多测试 12 次。
 
 ## 支持格式
 
@@ -163,7 +166,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 生成质量页会显示 AI/本地忠实度审稿、缺失关键词和逐段来源映射。强制重生成前会保存历史版本，学习页可以从“生成质量”里恢复旧版本。`QUALITY_AUDIT_MODE=off` 可关闭额外 AI 审稿调用。
 
-生成、单词释义和 TTS 音频默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX` 控制。设为 `0` 可关闭对应限制。
+生成、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。
 
 ## 生词本
 

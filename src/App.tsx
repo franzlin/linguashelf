@@ -22,6 +22,7 @@ import {
   Pencil,
   Play,
   RotateCcw,
+  Server,
   Settings,
   TrendingUp,
   Trash2,
@@ -31,7 +32,7 @@ import {
   X,
 } from 'lucide-react'
 
-type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'settings'
+type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'settings'
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
 type UserProfile = {
@@ -442,6 +443,55 @@ type SecurityStatus = {
   }
 }
 
+type AiServiceCheck = {
+  serviceId: string
+  status: 'ok' | 'failed'
+  message: string
+  latencyMs: number
+  checkedAt: string
+  provider?: string
+  model?: string
+  endpointHost?: string
+  mimeType?: string
+}
+
+type AiService = {
+  id: string
+  title: string
+  role: string
+  category: 'text' | 'audio' | 'ocr'
+  priority: string
+  configured: boolean
+  status: 'ok' | 'configured' | 'warning' | 'failed' | 'missing'
+  provider: string
+  model: string
+  endpointHost: string
+  details: string[]
+  warning?: string
+  providers?: Array<{
+    role: string
+    label: string
+    model: string
+    endpointHost: string
+    keyId?: string
+    cooldownUntil?: string
+  }>
+  lastCheck?: AiServiceCheck | null
+}
+
+type AiServicesPayload = {
+  updatedAt: string
+  overview: {
+    configured: number
+    total: number
+    healthy: number
+    activeCooldowns: number
+    serviceTestLimit: number
+    serviceTestWindowMinutes: number
+  }
+  services: AiService[]
+}
+
 type SelectedAid =
   | { kind: 'word'; word: string; detail?: VocabularyItem }
   | { kind: 'sentence'; sentence: string; summary: string }
@@ -560,6 +610,32 @@ function formatDateTime(value?: string | null) {
   } catch {
     return value
   }
+}
+
+function aiServiceStatusLabel(status: AiService['status']) {
+  const labels: Record<AiService['status'], string> = {
+    ok: '已通过',
+    configured: '已配置',
+    warning: '需关注',
+    failed: '失败',
+    missing: '未配置',
+  }
+  return labels[status] || status
+}
+
+function aiServiceStatusClass(status: AiService['status']) {
+  if (status === 'ok') return 'completed'
+  if (status === 'configured') return 'queued'
+  if (status === 'warning') return 'running'
+  if (status === 'failed' || status === 'missing') return 'failed'
+  return ''
+}
+
+function aiServiceIcon(service: AiService) {
+  if (service.id === 'podcast-tts-primary' || service.id === 'podcast-tts-fallback') return Headphones
+  if (service.id === 'listening-tts') return Volume2
+  if (service.category === 'ocr') return FileText
+  return Brain
 }
 
 function delay(ms: number) {
@@ -925,6 +1001,13 @@ export function App() {
           />
         )}
 
+        {view === 'services' && (
+          <ServicesView
+            token={token}
+            onError={setError}
+          />
+        )}
+
         {view === 'settings' && (
           <SettingsView
             settings={data.settings}
@@ -1263,6 +1346,7 @@ function Sidebar({
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
+    { view: 'services', label: '服务', icon: Server },
     { view: 'settings', label: '设置', icon: Settings },
   ]
 
@@ -1321,6 +1405,7 @@ function TopBar({
     reports: '学习报告',
     vocabulary: '生词本',
     tasks: '任务',
+    services: 'AI 服务',
     settings: '设置',
   }
   const items: Array<{ view: View; label: string; icon: typeof Home }> = [
@@ -1330,6 +1415,7 @@ function TopBar({
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
+    { view: 'services', label: '服务', icon: Server },
     { view: 'settings', label: '设置', icon: Settings },
   ]
   const installLabel = isAndroidBrowser() ? '安装到手机' : '安装'
@@ -2066,6 +2152,13 @@ function BookView({
             {visiblePodcasts.map((podcast) => {
               const busy = ['planned', 'scripting', 'synthesizing'].includes(podcast.status)
               const progress = busy ? (podcast.status === 'planned' ? 8 : podcast.status === 'scripting' ? 30 : 70) : podcast.status === 'ready' ? 100 : 100
+              const podcastTtsLabel = podcast.audio?.provider
+                ? `TTS ${podcast.audio.provider}`
+                : podcast.status === 'ready'
+                  ? 'TTS 来源未记录'
+                  : busy
+                    ? 'TTS 合成中'
+                    : 'TTS 待生成'
               return (
                 <article key={podcast.id} className="podcast-row">
                   <div className="unit-index">{String(podcast.index).padStart(2, '0')}</div>
@@ -2074,14 +2167,21 @@ function BookView({
                       <h3>{podcast.title || `Podcast ${podcast.index}`}</h3>
                       <span className={`status-pill ${podcastStatusClass(podcast)}`}>{podcastStatusLabel(podcast)}</span>
                     </div>
-                    <p>
-                      {podcastKindLabel(podcast.kind)} · {formatNumber(podcast.sourceWordCount)} 源文本词数 · Lexile {podcast.lexile}L · 声音 {podcast.audio?.voice || podcast.voice || settings.podcastVoice}
-                      {podcast.audio
-                        ? ` · ${String(podcast.audio.format || 'audio').toUpperCase()} · ${formatDuration(podcast.audio.durationSeconds)} · ${formatBytes(podcast.audio.byteLength)} · ${podcast.audio.chunkCount} 块`
-                        : ''}
-                      {podcast.audio?.provider ? ` · ${podcast.audio.provider}` : ''}
-                      {podcast.progress?.positionSeconds ? ` · 已听 ${formatDuration(podcast.progress.positionSeconds)}` : ''}
-                    </p>
+                    <div className="podcast-meta">
+                      <span>{podcastKindLabel(podcast.kind)} · {formatNumber(podcast.sourceWordCount)} 源文本词数</span>
+                      <span>Lexile {podcast.lexile}L · 声音 {podcast.audio?.voice || podcast.voice || settings.podcastVoice}</span>
+                      {podcast.audio && (
+                        <span>
+                          {String(podcast.audio.format || 'audio').toUpperCase()} · {formatDuration(podcast.audio.durationSeconds)} · {formatBytes(podcast.audio.byteLength)} · {podcast.audio.chunkCount} 块
+                        </span>
+                      )}
+                      <span className={podcast.audio?.provider ? 'tts-source-chip' : 'tts-source-chip muted'}>
+                        <Headphones size={14} />
+                        {podcastTtsLabel}
+                      </span>
+                      {podcast.audio?.model && <span>模型 {podcast.audio.model}</span>}
+                      {podcast.progress?.positionSeconds ? <span>已听 {formatDuration(podcast.progress.positionSeconds)}</span> : null}
+                    </div>
                     {busy && <div className="progress-line task-progress"><span style={{ width: `${progress}%` }} /></div>}
                     {podcast.error && <p className="podcast-error">{podcast.error}</p>}
                     {audioUrls[podcast.id] && (
@@ -3089,6 +3189,147 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
               </div>
             </article>
           ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ServicesView({ token, onError }: { token: string; onError: (message: string) => void }) {
+  const [payload, setPayload] = useState<AiServicesPayload | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState('')
+
+  async function loadServices() {
+    const result = await requestJson<AiServicesPayload>('/api/ai/services', token)
+    setPayload(result)
+  }
+
+  useEffect(() => {
+    setLoading(true)
+    loadServices()
+      .catch((err) => onError(err instanceof Error ? err.message : '服务状态加载失败'))
+      .finally(() => setLoading(false))
+  }, [token])
+
+  async function testService(service: AiService) {
+    setBusyId(service.id)
+    try {
+      const result = await requestJson<AiServicesPayload & { check: AiServiceCheck }>(`/api/ai/services/${service.id}/test`, token, {
+        method: 'POST',
+      })
+      setPayload(result)
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '服务测试失败')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  const services = payload?.services || []
+
+  return (
+    <section className="page-section services-section">
+      <div className="section-head">
+        <div>
+          <h1>AI 服务</h1>
+          <p>主来源、兜底来源和最近检查结果，不显示任何密钥。</p>
+        </div>
+        <button className="ghost-button" type="button" onClick={() => loadServices().catch(() => undefined)} disabled={loading}>
+          {loading ? <Loader2 className="spin" size={18} /> : <RotateCcw size={18} />}
+          刷新
+        </button>
+      </div>
+
+      {payload && (
+        <div className="stat-row service-overview">
+          <Stat label="已配置服务" value={`${payload.overview.configured}/${payload.overview.total}`} />
+          <Stat label="健康/待测" value={String(payload.overview.healthy)} />
+          <Stat label="主源冷却" value={String(payload.overview.activeCooldowns)} />
+          <Stat label="测试额度" value={`${payload.overview.serviceTestLimit}/${payload.overview.serviceTestWindowMinutes} 分钟`} />
+        </div>
+      )}
+
+      {loading && !payload ? (
+        <div className="empty-state">
+          <Loader2 className="spin" size={32} />
+          <h2>正在读取服务状态</h2>
+          <p>只读取安全的配置摘要。</p>
+        </div>
+      ) : (
+        <div className="service-grid">
+          {services.map((service) => {
+            const Icon = aiServiceIcon(service)
+            const testing = busyId === service.id
+            return (
+              <article key={service.id} className={`service-card ${service.status}`}>
+                <div className="service-card-head">
+                  <div className="service-title">
+                    <span className="service-icon">
+                      <Icon size={20} />
+                    </span>
+                    <div>
+                      <h2>{service.title}</h2>
+                      <p>{service.role}</p>
+                    </div>
+                  </div>
+                  <span className={`status-pill ${aiServiceStatusClass(service.status)}`}>{aiServiceStatusLabel(service.status)}</span>
+                </div>
+
+                <div className="service-meta">
+                  <span>{service.priority}</span>
+                  <span>{service.endpointHost || '未配置域名'}</span>
+                  <span>{service.model || '未配置模型'}</span>
+                </div>
+
+                <div className="service-facts">
+                  <StatusItem label="来源" ok={service.configured} value={service.provider || '未配置'} />
+                  <StatusItem label="域名" ok={service.configured} value={service.endpointHost || '未配置'} />
+                  <StatusItem label="模型" ok={service.configured} value={service.model || '未配置'} />
+                </div>
+
+                {service.details.length > 0 && (
+                  <div className="service-detail-list">
+                    {service.details.map((detail) => (
+                      <span key={detail}>{detail}</span>
+                    ))}
+                  </div>
+                )}
+
+                {service.providers && service.providers.length > 0 && (
+                  <div className="provider-list">
+                    {service.providers.map((provider) => (
+                      <div key={`${provider.role}-${provider.label}-${provider.keyId || ''}`}>
+                        <strong>{provider.label}</strong>
+                        <span>
+                          {provider.endpointHost} · {provider.model}
+                          {provider.keyId ? ` · key ${provider.keyId}` : ''}
+                          {provider.cooldownUntil ? ` · 冷却到 ${formatDateTime(provider.cooldownUntil)}` : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {service.warning && <p className="service-warning">{service.warning}</p>}
+
+                <div className={service.lastCheck?.status === 'failed' ? 'service-check failed' : 'service-check'}>
+                  <div>
+                    <strong>{service.lastCheck ? (service.lastCheck.status === 'ok' ? '最近测试成功' : '最近测试失败') : '尚未测试'}</strong>
+                    <p>
+                      {service.lastCheck
+                        ? `${formatDateTime(service.lastCheck.checkedAt)} · ${service.lastCheck.latencyMs} ms · ${service.lastCheck.message}`
+                        : '点击测试会发起一次轻量检查；TTS 测试会真实生成一小段音频。'}
+                    </p>
+                  </div>
+                  <button type="button" onClick={() => testService(service)} disabled={testing || !service.configured}>
+                    {testing ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+                    {testing ? '测试中' : '测试'}
+                  </button>
+                </div>
+              </article>
+            )
+          })}
         </div>
       )}
     </section>

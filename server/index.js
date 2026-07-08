@@ -75,6 +75,7 @@ const aiRateLimits = {
   'define-word': { max: Number(process.env.RATE_LIMIT_DEFINITIONS_MAX || 120), windowMs: rateLimitWindowMs },
   'speech-audio': { max: Number(process.env.RATE_LIMIT_AUDIO_MAX || 30), windowMs: rateLimitWindowMs },
   'generate-podcast': { max: Number(process.env.RATE_LIMIT_PODCAST_EPISODES_MAX || 12), windowMs: rateLimitWindowMs },
+  'service-test': { max: Number(process.env.RATE_LIMIT_SERVICE_TEST_MAX || 12), windowMs: rateLimitWindowMs },
 }
 const loginAttempts = new Map()
 const actionRateBuckets = new Map()
@@ -99,6 +100,7 @@ const defaultDb = {
   settings: [],
   jobs: [],
   podcasts: [],
+  serviceChecks: [],
 }
 
 let sqliteDb = null
@@ -2169,13 +2171,20 @@ function apiKeyId(apiKey) {
   return crypto.createHash('sha256').update(String(apiKey || '')).digest('hex').slice(0, 10)
 }
 
-function geminiTtsProviders() {
+function serviceEndpointHost(baseUrl) {
+  try {
+    const url = new URL(String(baseUrl || ''))
+    return url.host
+  } catch {
+    return String(baseUrl || '').replace(/^https?:\/\//i, '').split('/')[0] || ''
+  }
+}
+
+function geminiTtsPrimaryProviders() {
   const officialKeys = parseApiKeyList(process.env.GEMINI_TTS_OFFICIAL_API_KEY)
-  const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
-  const providers = []
   const officialBaseUrl = process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com'
   const primaryLabel = geminiPrimaryTtsLabel(officialBaseUrl)
-  const officialProviders = officialKeys.map((apiKey, index) => ({
+  return officialKeys.map((apiKey, index) => ({
       name: 'official-gemini',
       label: officialKeys.length > 1 ? `${primaryLabel} #${index + 1}` : primaryLabel,
       baseUrl: officialBaseUrl,
@@ -2185,24 +2194,34 @@ function geminiTtsProviders() {
       maxInputTokens: geminiTtsInputTokenLimit,
       official: true,
     }))
-  if (officialProviders.length > 1) {
-    const offset = geminiOfficialTtsCursor % officialProviders.length
+}
+
+function geminiTtsFallbackProvider() {
+  const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
+  if (!fallbackKey) return null
+  return {
+    name: 'gemini-fallback',
+    label: 'Gemini TTS 兜底',
+    baseUrl: process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top',
+    apiKey: fallbackKey,
+    model: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+    maxInputTokens: Number(process.env.GEMINI_TTS_FALLBACK_INPUT_TOKEN_LIMIT || geminiTtsInputTokenLimit),
+    official: /generativelanguage\.googleapis\.com/i.test(process.env.GEMINI_TTS_BASE_URL || ''),
+  }
+}
+
+function geminiTtsProviders() {
+  const primaryProviders = geminiTtsPrimaryProviders()
+  const providers = []
+  if (primaryProviders.length > 1) {
+    const offset = geminiOfficialTtsCursor % primaryProviders.length
     geminiOfficialTtsCursor += 1
-    providers.push(...officialProviders.slice(offset), ...officialProviders.slice(0, offset))
+    providers.push(...primaryProviders.slice(offset), ...primaryProviders.slice(0, offset))
   } else {
-    providers.push(...officialProviders)
+    providers.push(...primaryProviders)
   }
-  if (fallbackKey) {
-    providers.push({
-      name: 'gemini-fallback',
-      label: 'Gemini TTS 兜底',
-      baseUrl: process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top',
-      apiKey: fallbackKey,
-      model: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
-      maxInputTokens: Number(process.env.GEMINI_TTS_FALLBACK_INPUT_TOKEN_LIMIT || geminiTtsInputTokenLimit),
-      official: /generativelanguage\.googleapis\.com/i.test(process.env.GEMINI_TTS_BASE_URL || ''),
-    })
-  }
+  const fallback = geminiTtsFallbackProvider()
+  if (fallback) providers.push(fallback)
   const now = Date.now()
   return providers.filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
 }
@@ -2316,6 +2335,324 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     durationSeconds: audioFile.durationSeconds,
     chunkCount: chunks.length,
     generatedAt: new Date().toISOString(),
+  }
+}
+
+function sanitizeServiceMessage(message) {
+  return String(message || '')
+    .replace(/sk-[A-Za-z0-9_-]{12,}/g, 'sk-***')
+    .replace(/AIza[A-Za-z0-9_-]{20,}/g, 'AIza***')
+    .slice(0, 360)
+}
+
+function serviceCheckFor(db, userId, serviceId) {
+  return db.serviceChecks.find((item) => item.userId === userId && item.serviceId === serviceId) || null
+}
+
+function publicServiceCheck(check) {
+  if (!check) return null
+  return {
+    serviceId: check.serviceId,
+    status: check.status,
+    message: check.message,
+    latencyMs: check.latencyMs,
+    checkedAt: check.checkedAt,
+    provider: check.provider || '',
+    model: check.model || '',
+    endpointHost: check.endpointHost || '',
+    mimeType: check.mimeType || '',
+  }
+}
+
+function saveServiceCheck(db, userId, serviceId, result) {
+  const now = new Date().toISOString()
+  let check = serviceCheckFor(db, userId, serviceId)
+  if (!check) {
+    check = { id: nanoid(), userId, serviceId, createdAt: now }
+    db.serviceChecks.push(check)
+  }
+  Object.assign(check, {
+    status: result.status,
+    message: sanitizeServiceMessage(result.message),
+    latencyMs: Number(result.latencyMs || 0),
+    checkedAt: now,
+    provider: result.provider || '',
+    model: result.model || '',
+    endpointHost: result.endpointHost || '',
+    mimeType: result.mimeType || '',
+    updatedAt: now,
+  })
+  return publicServiceCheck(check)
+}
+
+function serviceStatusFrom(configured, check, warning = '') {
+  if (!configured) return 'missing'
+  if (check?.status === 'ok') return warning ? 'warning' : 'ok'
+  if (check?.status === 'failed') return 'failed'
+  return warning ? 'warning' : 'configured'
+}
+
+function publicGeminiProvider(provider, role) {
+  if (!provider) return null
+  const cooldownUntil = geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0
+  return {
+    role,
+    label: provider.label,
+    model: provider.model,
+    endpointHost: serviceEndpointHost(provider.baseUrl),
+    keyId: provider.keyId ? `#${provider.keyId.slice(0, 4)}` : '',
+    cooldownUntil: cooldownUntil > Date.now() ? new Date(cooldownUntil).toISOString() : '',
+  }
+}
+
+function buildAiServicesPayload(db, userId) {
+  const textBaseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const ttsBaseUrl = process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const textConfigured = Boolean(process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
+  const listeningTtsConfigured = Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
+  const primaryProviders = geminiTtsPrimaryProviders()
+  const fallbackProvider = geminiTtsFallbackProvider()
+  const primaryConfigured = primaryProviders.length > 0 || process.env.AI_PROVIDER === 'mock'
+  const primaryCooldowns = primaryProviders
+    .map((provider) => geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0)
+    .filter((time) => time > Date.now())
+  const primaryWarning = primaryCooldowns.length > 0 && primaryCooldowns.length >= primaryProviders.length ? '主来源暂时冷却，播客会走兜底来源' : ''
+  const visionConfigured = shouldUseVisionOcr()
+  const localOcrConfigured = pdfOcrEnabled
+  const services = [
+    {
+      id: 'text-ai',
+      title: '文本生成',
+      role: '分级阅读、题目、生词解释、播客脚本',
+      category: 'text',
+      priority: '主服务',
+      configured: textConfigured,
+      status: serviceStatusFrom(textConfigured, serviceCheckFor(db, userId, 'text-ai')),
+      provider: serviceEndpointHost(textBaseUrl),
+      model: process.env.OPENAI_MODEL || 'gpt-5.5',
+      endpointHost: serviceEndpointHost(textBaseUrl),
+      details: [`Responses 接口`, `生成质量审稿：${process.env.QUALITY_AUDIT_MODE || 'auto'}`],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'text-ai')),
+    },
+    {
+      id: 'listening-tts',
+      title: '听力预热 TTS',
+      role: '学习单元里的先听后读音频',
+      category: 'audio',
+      priority: '独立服务',
+      configured: listeningTtsConfigured,
+      status: serviceStatusFrom(listeningTtsConfigured, serviceCheckFor(db, userId, 'listening-tts')),
+      provider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
+      model: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+      endpointHost: serviceEndpointHost(ttsBaseUrl),
+      details: [`音色：${String(process.env.OPENAI_TTS_VOICES || process.env.OPENAI_TTS_VOICE || 'marin')}`, `格式：${(process.env.OPENAI_TTS_MODEL || '').startsWith('mimo-') ? 'WAV' : 'MP3'}`],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'listening-tts')),
+    },
+    {
+      id: 'podcast-tts-primary',
+      title: '播客 TTS 主来源',
+      role: '播客 MP3 合成，当前优先使用 Yunwu/Gemini 3.1 兼容源',
+      category: 'audio',
+      priority: '第一优先',
+      configured: primaryConfigured,
+      status: serviceStatusFrom(primaryConfigured, serviceCheckFor(db, userId, 'podcast-tts-primary'), primaryWarning),
+      provider: geminiPrimaryTtsLabel(process.env.GEMINI_TTS_OFFICIAL_BASE_URL || ''),
+      model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
+      endpointHost: serviceEndpointHost(process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com'),
+      details: [
+        `Key 数量：${primaryProviders.length}`,
+        `输入/输出上限：${formatServiceNumber(geminiTtsInputTokenLimit)} / ${formatServiceNumber(geminiTtsOutputTokenLimit)} tokens`,
+        `分块：约 ${formatServiceNumber(podcastTtsChunkTokens)} tokens 或 ${formatServiceNumber(podcastTtsChunkChars)} 字`,
+      ],
+      providers: primaryProviders.map((provider) => publicGeminiProvider(provider, 'primary')),
+      warning: primaryWarning,
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-primary')),
+    },
+    {
+      id: 'podcast-tts-fallback',
+      title: '播客 TTS 兜底',
+      role: '主来源失败时自动接手',
+      category: 'audio',
+      priority: '备用',
+      configured: Boolean(fallbackProvider),
+      status: serviceStatusFrom(Boolean(fallbackProvider), serviceCheckFor(db, userId, 'podcast-tts-fallback')),
+      provider: fallbackProvider?.label || 'Gemini TTS 兜底',
+      model: fallbackProvider?.model || process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+      endpointHost: serviceEndpointHost(fallbackProvider?.baseUrl || process.env.GEMINI_TTS_BASE_URL || ''),
+      details: [`音色：${process.env.GEMINI_TTS_VOICE || 'Kore'}`, `并发：${Math.max(1, Math.min(4, podcastTtsConcurrency))} 块`],
+      providers: fallbackProvider ? [publicGeminiProvider(fallbackProvider, 'fallback')] : [],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-fallback')),
+    },
+    {
+      id: 'vision-ocr',
+      title: 'PDF 视觉 OCR',
+      role: '扫描版 PDF 的优先识别来源',
+      category: 'ocr',
+      priority: 'Hunyuan 优先',
+      configured: visionConfigured,
+      status: serviceStatusFrom(visionConfigured, serviceCheckFor(db, userId, 'vision-ocr')),
+      provider: pdfOcrProvider,
+      model: pdfOcrVisionModel,
+      endpointHost: serviceEndpointHost(pdfOcrVisionBaseUrl),
+      details: [`视觉 DPI：${pdfOcrVisionDpi}`, `最少正文词：${pdfOcrVisionMinWords}`, `最多页数：${pdfOcrMaxPages}`],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'vision-ocr')),
+    },
+    {
+      id: 'local-ocr',
+      title: '本地 OCR 兜底',
+      role: '视觉 OCR 失败后使用 Tesseract',
+      category: 'ocr',
+      priority: '备用',
+      configured: localOcrConfigured,
+      status: serviceStatusFrom(localOcrConfigured, serviceCheckFor(db, userId, 'local-ocr')),
+      provider: 'tesseract-ocr',
+      model: pdfOcrLanguage,
+      endpointHost: 'server-local',
+      details: [`DPI：${pdfOcrDpi}`, `命令超时：${Math.round(pdfOcrCommandTimeoutMs / 1000)} 秒`],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'local-ocr')),
+    },
+  ]
+  const configuredCount = services.filter((service) => service.configured).length
+  const healthyCount = services.filter((service) => ['ok', 'configured', 'warning'].includes(service.status)).length
+  return {
+    updatedAt: new Date().toISOString(),
+    overview: {
+      configured: configuredCount,
+      total: services.length,
+      healthy: healthyCount,
+      activeCooldowns: primaryCooldowns.length,
+      serviceTestLimit: aiRateLimits['service-test'].max,
+      serviceTestWindowMinutes: Math.round(aiRateLimits['service-test'].windowMs / 60000),
+    },
+    services,
+  }
+}
+
+function formatServiceNumber(value) {
+  return new Intl.NumberFormat('en-US').format(Number(value || 0))
+}
+
+async function testTextAiService() {
+  if (process.env.AI_PROVIDER === 'mock') return { message: 'Mock 文本服务可用', provider: 'mock', model: 'mock' }
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) throw new Error('未配置文本生成 API key')
+  const model = process.env.OPENAI_MODEL || 'gpt-5.5'
+  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const response = await fetch(`${baseUrl}/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      store: false,
+      input: 'Return only the word OK.',
+      max_output_tokens: 16,
+    }),
+  })
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`文本服务失败：${response.status} ${body.slice(0, 220)}`)
+  }
+  const data = await response.json()
+  if (!getResponsesOutputText(data)) throw new Error('文本服务未返回内容')
+  return { message: '文本生成接口可用', provider: serviceEndpointHost(baseUrl), model, endpointHost: serviceEndpointHost(baseUrl) }
+}
+
+async function testListeningTtsService() {
+  if (process.env.AI_PROVIDER === 'mock') return { message: 'Mock 听力 TTS 可用', provider: 'mock', model: 'mock' }
+  const ttsProvider = process.env.OPENAI_TTS_PROVIDER || 'openai-speech'
+  const apiKey = process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY
+  if (!apiKey) throw new Error('未配置听力预热 TTS API key')
+  const model = process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts'
+  const baseUrl = process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const outputFormat = ttsProvider === 'mimo' || model.startsWith('mimo-') ? 'wav' : 'mp3'
+  const bytes =
+    ttsProvider === 'mimo' || model.startsWith('mimo-')
+      ? await generateMimoSpeech({
+          baseUrl,
+          apiKey,
+          model,
+          voice: resolveTtsVoice('service-test'),
+          input: 'This is a short LinguaShelf listening warm-up voice check.',
+          instructions: process.env.OPENAI_TTS_INSTRUCTIONS || 'Read naturally and clearly.',
+          outputFormat,
+        })
+      : await generateOpenAISpeech({
+          baseUrl,
+          apiKey,
+          model,
+          voice: resolveTtsVoice('service-test'),
+          input: 'This is a short LinguaShelf listening warm-up voice check.',
+          instructions: process.env.OPENAI_TTS_INSTRUCTIONS || 'Read naturally and clearly.',
+          outputFormat,
+        })
+  if (bytes.length < 600) throw new Error('听力预热 TTS 返回的音频过小')
+  return { message: `听力预热 TTS 可用，返回 ${bytes.length} bytes`, provider: ttsProvider, model, endpointHost: serviceEndpointHost(baseUrl) }
+}
+
+async function testPodcastTtsProvider(provider) {
+  if (process.env.AI_PROVIDER === 'mock') return { message: 'Mock 播客 TTS 可用', provider: 'mock', model: 'mock', mimeType: 'audio/l16' }
+  if (!provider) throw new Error('未配置播客 TTS 来源')
+  const result = await requestGeminiTtsChunk(
+    provider,
+    'Read this short LinguaShelf podcast voice check in a calm, clear, natural teaching voice.',
+    process.env.GEMINI_TTS_VOICE || 'Kore'
+  )
+  if (result.pcm.length < 600) throw new Error(`${provider.label} 返回的音频过小`)
+  return {
+    message: `${provider.label} 可用，返回 ${result.pcm.length} bytes`,
+    provider: result.provider,
+    model: result.model,
+    endpointHost: serviceEndpointHost(provider.baseUrl),
+    mimeType: result.mimeType,
+  }
+}
+
+async function commandLooksAvailable(command, args) {
+  try {
+    await execFileAsync(command, args, { timeout: 5000, maxBuffer: 1024 * 1024 })
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    return Boolean(error?.stdout || error?.stderr)
+  }
+}
+
+async function runAiServiceTest(serviceId) {
+  const started = Date.now()
+  let result
+  if (serviceId === 'text-ai') {
+    result = await testTextAiService()
+  } else if (serviceId === 'listening-tts') {
+    result = await testListeningTtsService()
+  } else if (serviceId === 'podcast-tts-primary') {
+    const providers = geminiTtsPrimaryProviders()
+    const active = providers.find((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= Date.now())
+    result = await testPodcastTtsProvider(active || providers[0])
+  } else if (serviceId === 'podcast-tts-fallback') {
+    result = await testPodcastTtsProvider(geminiTtsFallbackProvider())
+  } else if (serviceId === 'vision-ocr') {
+    if (!shouldUseVisionOcr()) throw new Error('未配置视觉 OCR 来源')
+    result = {
+      message: '视觉 OCR 配置完整；实际识别质量会在上传扫描 PDF 时验证',
+      provider: pdfOcrProvider,
+      model: pdfOcrVisionModel,
+      endpointHost: serviceEndpointHost(pdfOcrVisionBaseUrl),
+    }
+  } else if (serviceId === 'local-ocr') {
+    const tesseractOk = await commandLooksAvailable('tesseract', ['--version'])
+    const popplerOk = await commandLooksAvailable('pdftoppm', ['-v'])
+    if (!tesseractOk || !popplerOk) throw new Error(`本地 OCR 缺少组件：${!tesseractOk ? 'tesseract ' : ''}${!popplerOk ? 'pdftoppm' : ''}`.trim())
+    result = { message: '本地 OCR 组件可用', provider: 'tesseract-ocr', model: pdfOcrLanguage, endpointHost: 'server-local' }
+  } else {
+    throw new Error('未知服务')
+  }
+  return {
+    status: 'ok',
+    latencyMs: Date.now() - started,
+    ...result,
   }
 }
 
@@ -4008,10 +4345,39 @@ async function createApp() {
           definitions: aiRateLimits['define-word'].max,
           audio: aiRateLimits['speech-audio'].max,
           podcasts: aiRateLimits['generate-podcast'].max,
+          serviceTests: aiRateLimits['service-test'].max,
         },
         activeJobs,
       },
     })
+  })
+
+  app.get('/api/ai/services', auth, async (req, res) => {
+    res.json(buildAiServicesPayload(req.db, req.user.id))
+  })
+
+  app.post('/api/ai/services/:serviceId/test', auth, async (req, res) => {
+    const serviceId = String(req.params.serviceId || '')
+    const known = new Set(['text-ai', 'listening-tts', 'podcast-tts-primary', 'podcast-tts-fallback', 'vision-ocr', 'local-ocr'])
+    if (!known.has(serviceId)) {
+      res.status(404).json({ error: '未知服务' })
+      return
+    }
+    if (!consumeUserQuota(req, res, 'service-test')) return
+
+    let check
+    const started = Date.now()
+    try {
+      check = saveServiceCheck(req.db, req.user.id, serviceId, await runAiServiceTest(serviceId))
+    } catch (error) {
+      check = saveServiceCheck(req.db, req.user.id, serviceId, {
+        status: 'failed',
+        message: error?.message || String(error),
+        latencyMs: Date.now() - started,
+      })
+    }
+    await writeDb(req.db)
+    res.json({ check, ...buildAiServicesPayload(req.db, req.user.id) })
   })
 
   app.patch('/api/account/password', auth, async (req, res) => {
