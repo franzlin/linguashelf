@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
+import crypto from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -39,7 +40,8 @@ const report = {
 try {
   const bytes = await fs.readFile(resolvedBackup)
   report.backupBytes = bytes.length
-  const zip = await JSZip.loadAsync(bytes)
+  const zipBytes = decryptBackupIfNeeded(bytes)
+  const zip = await JSZip.loadAsync(zipBytes)
   const entries = Object.values(zip.files)
   report.hasMeta = Boolean(zip.files['backup-meta.json'])
   report.hasDatabase = entries.some((entry) => !entry.dir && ['data/app.sqlite', 'data/db.json'].includes(entry.name))
@@ -81,6 +83,20 @@ try {
   await fs.mkdir(path.dirname(reportPath), { recursive: true })
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
   if (!process.env.KEEP_RESTORE_DRILL_TEMP) await fs.rm(tmpRoot, { recursive: true, force: true })
+}
+
+function decryptBackupIfNeeded(bytes) {
+  if (bytes.subarray(0, 4).toString('utf8') !== 'LSB1') return bytes
+  const passphrase = String(process.env.BACKUP_ENCRYPTION_KEY || '')
+  if (!passphrase) throw new Error('备份已加密，请设置 BACKUP_ENCRYPTION_KEY 后再演练恢复')
+  const salt = bytes.subarray(4, 20)
+  const iv = bytes.subarray(20, 32)
+  const tag = bytes.subarray(32, 48)
+  const ciphertext = bytes.subarray(48)
+  const key = crypto.scryptSync(passphrase, salt, 32)
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(tag)
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()])
 }
 
 if (report.ok) {
@@ -129,22 +145,18 @@ async function summarizeDirectory(dir) {
 }
 
 async function summarizeSqlite(file) {
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(file, { readOnly: true })
   try {
-    const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(file, { readOnly: true })
-    try {
-      const collections = {}
-      const rows = db.prepare('SELECT collection, COUNT(*) AS count FROM records GROUP BY collection').all()
-      for (const row of rows) collections[row.collection] = Number(row.count || 0)
-      return {
-        collections,
-        recordCount: Object.values(collections).reduce((sum, count) => sum + count, 0),
-      }
-    } finally {
-      db.close()
+    const collections = {}
+    const rows = db.prepare('SELECT collection, COUNT(*) AS count FROM records GROUP BY collection').all()
+    for (const row of rows) collections[row.collection] = Number(row.count || 0)
+    return {
+      collections,
+      recordCount: Object.values(collections).reduce((sum, count) => sum + count, 0),
     }
-  } catch {
-    return { collections: {}, recordCount: 1 }
+  } finally {
+    db.close()
   }
 }
 

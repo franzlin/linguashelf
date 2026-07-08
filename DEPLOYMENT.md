@@ -41,6 +41,9 @@ ALLOW_SIGNUP=false
 SIGNUP_INVITE_CODE=可选的邀请码
 INITIAL_ADMIN_EMAIL=你的邮箱
 INITIAL_ADMIN_PASSWORD=初始密码
+PASSWORD_MIN_LENGTH=8
+BACKUP_ENCRYPTION_KEY=建议填一段足够长的随机口令
+BACKUP_ENCRYPTION_REQUIRED=true
 ```
 
 `GEMINI_TTS_OFFICIAL_*` 是历史兼容变量名，实际表示“播客 TTS 主来源”。当前推荐填 Yunwu 这类 Gemini 兼容源；无需配置 Google 官方 key。
@@ -55,6 +58,7 @@ TRUST_PROXY=true
 SESSION_DAYS=30
 LOGIN_WINDOW_MINUTES=10
 LOGIN_MAX_FAILURES=8
+PASSWORD_MIN_LENGTH=8
 MAX_UPLOAD_MB=50
 MAX_EPUB_UPLOAD_MB=50
 MAX_PDF_UPLOAD_MB=50
@@ -69,11 +73,13 @@ PDF_OCR_LANGUAGE=eng
 PDF_OCR_DPI=220
 PDF_OCR_MAX_PAGES=120
 PDF_OCR_COMMAND_TIMEOUT_MS=120000
+MAX_ACTIVE_OCR_TASKS=1
 MAX_EPUB_EXPANDED_MB=200
 MAX_EPUB_ENTRIES=2000
 MAX_BATCH_GENERATE_UNITS=5
 MAX_AUTO_REGEN_ATTEMPTS=1
 RATE_LIMIT_WINDOW_MINUTES=60
+RATE_LIMIT_UPLOAD_MAX=8
 RATE_LIMIT_GENERATE_UNITS_MAX=20
 RATE_LIMIT_DEFINITIONS_MAX=120
 RATE_LIMIT_AUDIO_MAX=30
@@ -90,6 +96,7 @@ PODCAST_SCRIPT_SOURCE_CHUNK_WORDS=2600
 MAX_ACTIVE_PODCAST_JOBS=2
 RATE_LIMIT_PODCAST_EPISODES_MAX=12
 QUALITY_AUDIT_MODE=auto
+BACKUP_ENCRYPTION_REQUIRED=true
 ```
 
 ## 3. Docker Compose 启动
@@ -145,22 +152,22 @@ BASE_URL=https://你的域名 npm run smoke
 容器内备份：
 
 ```bash
-docker compose exec app npm run backup -- /app/backups/linguashelf.zip
+docker compose exec app npm run backup
 ```
 
-把备份文件复制到服务器当前目录：
+如果 `.env` 里配置了 `BACKUP_ENCRYPTION_KEY`，备份会自动写成 `*.zip.enc`。把备份文件复制到服务器当前目录：
 
 ```bash
-docker compose cp app:/app/backups/linguashelf.zip ./linguashelf.zip
+docker compose cp app:/app/backups/最新备份文件名 ./最新备份文件名
 ```
 
-建议把备份文件再同步到云盘、对象存储，或下载到自己的电脑。
+建议保持 `BACKUP_ENCRYPTION_REQUIRED=true`，再把加密后的备份文件同步到云盘、对象存储，或下载到自己的电脑。
 
 服务器每日自动备份。脚本默认会在备份完成后做一次非破坏性恢复演练：把刚生成的备份恢复到临时 `DATA_DIR`，并写出 `*.drill.json` 报告，不会覆盖生产数据。
 
 ```bash
 mkdir -p /opt/linguashelf-backups
-APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 bash /opt/linguashelf/deploy/backup-daily.sh
+APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 BACKUP_ENCRYPTION_KEY='同 .env 里的口令' bash /opt/linguashelf/deploy/backup-daily.sh
 ```
 
 确认手动执行成功后，加入 `cron`：
@@ -172,7 +179,7 @@ crontab -e
 追加一行，每天凌晨 3:20 备份，并默认保留 14 天：
 
 ```cron
-20 3 * * * APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 bash /opt/linguashelf/deploy/backup-daily.sh >> /var/log/linguashelf-backup.log 2>&1
+20 3 * * * APP_DIR=/opt/linguashelf HOST_BACKUP_DIR=/opt/linguashelf-backups RETENTION_DAYS=14 RUN_RESTORE_DRILL=1 BACKUP_ENCRYPTION_KEY='同 .env 里的口令' bash /opt/linguashelf/deploy/backup-daily.sh >> /var/log/linguashelf-backup.log 2>&1
 ```
 
 如果只想备份、不做恢复演练，把 `RUN_RESTORE_DRILL=1` 改成 `RUN_RESTORE_DRILL=0`。
@@ -180,7 +187,7 @@ crontab -e
 从服务器下载最近的备份到本机：
 
 ```bash
-scp root@你的服务器IP:/opt/linguashelf-backups/linguashelf-*.zip .
+scp root@你的服务器IP:/opt/linguashelf-backups/linguashelf-*.zip* .
 ```
 
 ## 6. 恢复
@@ -194,18 +201,18 @@ docker compose stop app
 把备份复制进容器并恢复：
 
 ```bash
-docker compose cp ./linguashelf.zip app:/app/backups/linguashelf.zip
-docker compose run --rm app npm run restore -- /app/backups/linguashelf.zip
+docker compose cp ./linguashelf-xxxx.zip.enc app:/app/backups/linguashelf-xxxx.zip.enc
+docker compose run --rm app npm run restore -- /app/backups/linguashelf-xxxx.zip.enc
 docker compose up -d
 ```
 
-恢复脚本会先把当前数据目录改名保留，再解压备份。
+恢复脚本会先把当前数据目录改名保留，再解压备份；加密备份需要容器环境里存在同一个 `BACKUP_ENCRYPTION_KEY`。
 
 只验证某个备份是否可恢复，不覆盖生产数据：
 
 ```bash
-docker compose cp ./linguashelf.zip app:/app/backups/drill.zip
-docker compose exec -T -e DATA_DIR=/tmp/linguashelf-restore-drill app sh -lc "rm -rf /tmp/linguashelf-restore-drill* && npm run backup:drill -- /app/backups/drill.zip /app/backups/manual-drill.json"
+docker compose cp ./linguashelf-xxxx.zip.enc app:/app/backups/drill.zip.enc
+docker compose exec -T -e DATA_DIR=/tmp/linguashelf-restore-drill app sh -lc "rm -rf /tmp/linguashelf-restore-drill* && npm run backup:drill -- /app/backups/drill.zip.enc /app/backups/manual-drill.json"
 docker compose cp app:/app/backups/manual-drill.json ./manual-drill.json
 ```
 

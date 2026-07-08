@@ -12,7 +12,11 @@ mkdir -p "$HOST_BACKUP_DIR"
 chmod 700 "$HOST_BACKUP_DIR"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-name="linguashelf-${stamp}.zip"
+suffix=".zip"
+if [ -n "${BACKUP_ENCRYPTION_KEY:-}" ]; then
+  suffix=".zip.enc"
+fi
+name="linguashelf-${stamp}${suffix}"
 container_path="/app/backups/${name}"
 host_path="${HOST_BACKUP_DIR}/${name}"
 
@@ -30,7 +34,7 @@ if [ "$RUN_RESTORE_DRILL" = "1" ]; then
   echo "Restore drill report: $drill_host_path"
 fi
 
-find "$HOST_BACKUP_DIR" -type f -name 'linguashelf-*.zip' -mtime "+${RETENTION_DAYS}" -delete
+find "$HOST_BACKUP_DIR" -type f \( -name 'linguashelf-*.zip' -o -name 'linguashelf-*.zip.enc' \) -mtime "+${RETENTION_DAYS}" -delete
 find "$HOST_BACKUP_DIR" -type f -name 'linguashelf-*.drill.json' -mtime "+${RETENTION_DAYS}" -delete
 
 echo "Backup written: $host_path"

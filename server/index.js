@@ -27,10 +27,11 @@ const storageDriver = String(process.env.STORAGE_DRIVER || 'sqlite').toLowerCase
 const isProd = process.argv.includes('--prod') || process.env.NODE_ENV === 'production'
 const port = Number(process.env.PORT || 5173)
 const signupInviteCode = String(process.env.SIGNUP_INVITE_CODE || '')
-const allowSignup = parseBoolean(process.env.ALLOW_SIGNUP, !isProd)
+const allowSignup = parseBoolean(process.env.ALLOW_SIGNUP, false)
 const sessionDays = Number(process.env.SESSION_DAYS || 30)
 const loginWindowMs = Number(process.env.LOGIN_WINDOW_MINUTES || 10) * 60 * 1000
 const loginMaxFailures = Number(process.env.LOGIN_MAX_FAILURES || 8)
+const passwordMinLength = Math.max(8, Number(process.env.PASSWORD_MIN_LENGTH || 8))
 const maxAutoRegenAttempts = Number(process.env.MAX_AUTO_REGEN_ATTEMPTS || 1)
 const maxUploadBytes = bytesFromMegabytes(process.env.MAX_UPLOAD_MB, 50)
 const maxEpubUploadBytes = bytesFromMegabytes(process.env.MAX_EPUB_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
@@ -71,6 +72,7 @@ const podcastKindLabels = {
   walkthrough: '全书分集讲解',
 }
 const aiRateLimits = {
+  upload: { max: Number(process.env.RATE_LIMIT_UPLOAD_MAX || 8), windowMs: rateLimitWindowMs },
   'generate-unit': { max: Number(process.env.RATE_LIMIT_GENERATE_UNITS_MAX || 20), windowMs: rateLimitWindowMs },
   'define-word': { max: Number(process.env.RATE_LIMIT_DEFINITIONS_MAX || 120), windowMs: rateLimitWindowMs },
   'speech-audio': { max: Number(process.env.RATE_LIMIT_AUDIO_MAX || 30), windowMs: rateLimitWindowMs },
@@ -81,6 +83,8 @@ const loginAttempts = new Map()
 const actionRateBuckets = new Map()
 const geminiTtsProviderCooldowns = new Map()
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
+let writeChain = Promise.resolve()
+let activeOcrTasks = 0
 let geminiOfficialTtsCursor = 0
 
 const upload = multer({
@@ -136,12 +140,17 @@ async function readDb() {
 }
 
 async function writeDb(db) {
-  if (storageDriver === 'sqlite') {
-    await ensureStore()
-    writeSqliteChanges(db)
-    return
+  const write = async () => {
+    if (storageDriver === 'sqlite') {
+      await ensureStore()
+      writeSqliteChanges(db)
+      return
+    }
+    await writeJsonSnapshot(db)
   }
-  await writeJsonSnapshot(db)
+  const nextWrite = writeChain.then(write, write)
+  writeChain = nextWrite.catch(() => undefined)
+  await nextWrite
 }
 
 async function writeJsonSnapshot(db) {
@@ -334,6 +343,17 @@ function formatMegabytes(bytes) {
   return `${Math.round(bytes / 1024 / 1024)}MB`
 }
 
+function isPdfFile(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.subarray(0, 5).toString('ascii') === '%PDF-'
+}
+
+function isEpubFile(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 58) return false
+  const isZip = buffer.subarray(0, 4).toString('binary') === 'PK\u0003\u0004'
+  const mimetype = buffer.subarray(30, 58).toString('utf8')
+  return isZip && mimetype === 'application/epub+zip'
+}
+
 function sessionExpiresAt(session) {
   if (session.expiresAt) return Date.parse(session.expiresAt)
   return Date.parse(session.createdAt || '') + sessionDays * 24 * 60 * 60 * 1000
@@ -451,6 +471,11 @@ function canCreateUser(inviteCode) {
   return allowSignup
 }
 
+function validatePasswordStrength(password) {
+  if (String(password || '').length < passwordMinLength) return `密码至少需要 ${passwordMinLength} 个字符`
+  return ''
+}
+
 async function ensureInitialAdmin() {
   const email = String(process.env.INITIAL_ADMIN_EMAIL || '').trim().toLowerCase()
   const password = String(process.env.INITIAL_ADMIN_PASSWORD || '')
@@ -489,8 +514,17 @@ function publicUser(user) {
     id: user.id,
     email: user.email,
     name: user.name,
+    role: user.role || 'user',
     createdAt: user.createdAt,
   }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== 'admin') {
+    res.status(403).json({ error: '需要管理员权限' })
+    return
+  }
+  next()
 }
 
 async function auth(req, res, next) {
@@ -752,8 +786,9 @@ function isNonReadingEpubItem(item, title = '') {
 async function parseEpub(buffer, filename) {
   const zip = await JSZip.loadAsync(buffer)
   validateEpubZip(zip)
+  const safeZip = createMeasuredZipReader(zip)
   const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '' })
-  const containerXml = await zip.file('META-INF/container.xml')?.async('string')
+  const containerXml = await readZipText(safeZip, 'META-INF/container.xml')
   if (!containerXml) throw new Error('EPUB 文件缺少 container.xml')
 
   const container = xmlParser.parse(containerXml)
@@ -761,7 +796,7 @@ async function parseEpub(buffer, filename) {
   const opfPath = rootFile?.['full-path']
   if (!opfPath) throw new Error('无法识别 EPUB 包结构')
 
-  const opfXml = await zip.file(opfPath)?.async('string')
+  const opfXml = await readZipText(safeZip, opfPath)
   if (!opfXml) throw new Error('无法读取 EPUB 内容清单')
 
   const opf = xmlParser.parse(opfXml)
@@ -772,7 +807,7 @@ async function parseEpub(buffer, filename) {
   const baseDir = path.posix.dirname(opfPath)
   const title = textValue(metadata['dc:title']) || filename.replace(/\.[^.]+$/, '')
   const author = textValue(metadata['dc:creator']) || ''
-  const tocMap = await buildEpubTocMap(zip, manifest, packageNode, opfPath, xmlParser)
+  const tocMap = await buildEpubTocMap(safeZip, manifest, packageNode, opfPath, xmlParser)
 
   const chapters = []
   for (const ref of spine) {
@@ -780,7 +815,7 @@ async function parseEpub(buffer, filename) {
     if (!item?.href || !String(item['media-type'] || '').includes('html')) continue
 
     const itemPath = epubPath(baseDir, item.href)
-    const rawHtml = await zip.file(itemPath)?.async('string')
+    const rawHtml = await readZipText(safeZip, itemPath)
     if (!rawHtml) continue
 
     const fallbackTitle = tocTitleForPath(tocMap, itemPath, extractHeading(rawHtml, `Chapter ${chapters.length + 1}`))
@@ -811,13 +846,36 @@ async function parseEpub(buffer, filename) {
 function validateEpubZip(zip) {
   const entries = Object.values(zip.files || {})
   if (entries.length > maxEpubEntries) throw new Error('EPUB 文件条目过多，暂不支持处理')
-
-  let expandedBytes = 0
   for (const entry of entries) {
     if (entry.dir) continue
-    expandedBytes += Number(entry?._data?.uncompressedSize || 0)
-    if (expandedBytes > maxEpubExpandedBytes) throw new Error(`EPUB 解压后内容超过 ${formatMegabytes(maxEpubExpandedBytes)}`)
+    const unsafeName = String(entry.name || '')
+    if (unsafeName.includes('\0') || unsafeName.split('/').some((part) => part === '..')) {
+      throw new Error('EPUB 文件包含不安全路径')
+    }
   }
+}
+
+function createMeasuredZipReader(zip) {
+  let expandedBytes = 0
+  return {
+    file(name) {
+      const entry = zip.file(name)
+      if (!entry) return null
+      return {
+        async async(type) {
+          const value = await entry.async(type)
+          const size = typeof value === 'string' ? Buffer.byteLength(value, 'utf8') : Buffer.byteLength(value)
+          expandedBytes += size
+          if (expandedBytes > maxEpubExpandedBytes) throw new Error(`EPUB 解压后内容超过 ${formatMegabytes(maxEpubExpandedBytes)}`)
+          return value
+        },
+      }
+    },
+  }
+}
+
+async function readZipText(zip, name) {
+  return zip.file(name)?.async('string')
 }
 
 function textValue(value) {
@@ -977,7 +1035,7 @@ async function parsePdf(buffer, filename) {
     const result = await parser.getText()
     const pages = cleanPdfPages(result.pages || [])
     const usable = pages.filter((page) => page.wordCount >= 60)
-    const sourcePages = usable.length ? usable : await ocrPdfFallback(buffer, inferPdfPageCount(result))
+    const sourcePages = usable.length ? usable : await withOcrSlot(() => ocrPdfFallback(buffer, inferPdfPageCount(result)))
 
     const chapters = groupPdfPages(sourcePages)
     if (!chapters.length) {
@@ -991,6 +1049,19 @@ async function parsePdf(buffer, filename) {
     }
   } finally {
     await parser.destroy()
+  }
+}
+
+async function withOcrSlot(task) {
+  const maxConcurrent = Math.max(1, Number(process.env.MAX_ACTIVE_OCR_TASKS || 1))
+  if (activeOcrTasks >= maxConcurrent) {
+    throw new Error('OCR 队列正忙，请稍后再上传扫描版 PDF')
+  }
+  activeOcrTasks += 1
+  try {
+    return await task()
+  } finally {
+    activeOcrTasks -= 1
   }
 }
 
@@ -3551,14 +3622,19 @@ function exampleSentenceForTerm(content, term) {
 }
 
 function csvCell(value) {
-  return `"${String(value || '').replace(/"/g, '""')}"`
+  return `"${escapeSpreadsheetFormula(value).replace(/"/g, '""')}"`
 }
 
 function tsvCell(value) {
-  return String(value || '')
+  return escapeSpreadsheetFormula(value)
     .replace(/\t/g, ' ')
     .replace(/\r?\n/g, ' ')
     .trim()
+}
+
+function escapeSpreadsheetFormula(value) {
+  const text = String(value || '')
+  return /^[=+\-@]/.test(text.trimStart()) ? `'${text}` : text
 }
 
 const readingLevels = ['A2', 'A2+', 'B1', 'B1+', 'B2']
@@ -4073,7 +4149,7 @@ async function computeBackupStatus() {
         })
     )
     const backups = files
-      .filter((file) => /^linguashelf-.*\.zip$/.test(file.name))
+      .filter((file) => /^linguashelf-.*\.zip(\.enc)?$/.test(file.name))
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
     const drills = files
       .filter((file) => /^linguashelf-.*\.drill\.json$/.test(file.name))
@@ -4750,11 +4826,18 @@ async function createApp() {
         res.status(401).json({ error: loginFailureMessage })
         return
       }
+      const passwordError = validatePasswordStrength(password)
+      if (passwordError) {
+        recordLoginFailure(limit.key)
+        res.status(400).json({ error: passwordError })
+        return
+      }
       user = {
         id: nanoid(),
         email,
         name: email.split('@')[0] || 'Learner',
         passwordHash: hashPassword(password),
+        role: 'user',
         createdAt: new Date().toISOString(),
       }
       db.users.push(user)
@@ -4807,7 +4890,7 @@ async function createApp() {
     res.json({ settings })
   })
 
-  app.get('/api/security/status', auth, async (req, res) => {
+  app.get('/api/security/status', auth, requireAdmin, async (req, res) => {
     const db = req.db
     const activeJobs = db.jobs.filter((job) => job.userId === req.user.id && ['queued', 'running'].includes(job.status)).length
     const backup = await computeBackupStatus()
@@ -4818,6 +4901,7 @@ async function createApp() {
         sessionDays,
         loginWindowMinutes: Math.round(loginWindowMs / 60000),
         loginMaxFailures,
+        passwordMinLength,
       },
       deployment: {
         nodeEnv: process.env.NODE_ENV || 'development',
@@ -4852,6 +4936,7 @@ async function createApp() {
         rateLimitWindowMinutes: Math.round(rateLimitWindowMs / 60000),
         rateLimits: {
           generateUnits: aiRateLimits['generate-unit'].max,
+          upload: aiRateLimits.upload.max,
           definitions: aiRateLimits['define-word'].max,
           audio: aiRateLimits['speech-audio'].max,
           podcasts: aiRateLimits['generate-podcast'].max,
@@ -4862,11 +4947,11 @@ async function createApp() {
     })
   })
 
-  app.get('/api/ai/services', auth, async (req, res) => {
+  app.get('/api/ai/services', auth, requireAdmin, async (req, res) => {
     res.json(buildAiServicesPayload(req.db, req.user.id))
   })
 
-  app.post('/api/ai/services/:serviceId/test', auth, async (req, res) => {
+  app.post('/api/ai/services/:serviceId/test', auth, requireAdmin, async (req, res) => {
     const serviceId = String(req.params.serviceId || '')
     const known = new Set(['text-ai', 'listening-tts', 'podcast-tts-primary', 'podcast-tts-fallback', 'vision-ocr', 'local-ocr'])
     if (!known.has(serviceId)) {
@@ -4890,15 +4975,16 @@ async function createApp() {
     res.json({ check, ...buildAiServicesPayload(req.db, req.user.id) })
   })
 
-  app.get('/api/admin/status', auth, async (req, res) => {
+  app.get('/api/admin/status', auth, requireAdmin, async (req, res) => {
     res.json(await buildAdminStatusPayload(req.db, req.user.id))
   })
 
   app.patch('/api/account/password', auth, async (req, res) => {
     const currentPassword = String(req.body.currentPassword || '')
     const nextPassword = String(req.body.nextPassword || '')
-    if (nextPassword.length < 8) {
-      res.status(400).json({ error: '新密码至少需要 8 个字符' })
+    const passwordError = validatePasswordStrength(nextPassword)
+    if (passwordError) {
+      res.status(400).json({ error: passwordError })
       return
     }
     if (!verifyPassword(currentPassword, req.user.passwordHash)) {
@@ -4921,6 +5007,7 @@ async function createApp() {
 
   app.post('/api/books/upload', auth, uploadBookFile, async (req, res, next) => {
     try {
+      if (!consumeUserQuota(req, res, 'upload')) return
       if (!req.file) {
         res.status(400).json({ error: '请选择 EPUB 或 PDF 文件' })
         return
@@ -4930,6 +5017,14 @@ async function createApp() {
       const ext = path.extname(original).toLowerCase()
       if (!['.epub', '.pdf'].includes(ext)) {
         res.status(400).json({ error: '目前支持 EPUB 和 PDF 文件' })
+        return
+      }
+      if (ext === '.epub' && !isEpubFile(req.file.buffer)) {
+        res.status(400).json({ error: '文件内容不像有效的 EPUB，请确认文件没有损坏' })
+        return
+      }
+      if (ext === '.pdf' && !isPdfFile(req.file.buffer)) {
+        res.status(400).json({ error: '文件内容不像有效的 PDF，请确认文件没有损坏' })
         return
       }
       if (ext === '.epub' && req.file.size > maxEpubUploadBytes) {

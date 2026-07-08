@@ -40,6 +40,7 @@ type UserProfile = {
   id: string
   email: string
   name: string
+  role?: string
   createdAt: string
 }
 
@@ -734,6 +735,21 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function abortableDelay(ms: number, signal: AbortSignal) {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, ms)
+    signal.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer)
+        resolve()
+      },
+      { once: true },
+    )
+  })
+}
+
 function splitSentences(text: string) {
   return text
     .split(/(?<=[.!?])\s+/)
@@ -760,6 +776,8 @@ export function App() {
   const [loading, setLoading] = useState(Boolean(token))
   const [error, setError] = useState('')
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const jobWatchAbortRef = useRef<AbortController | null>(null)
+  const isAdmin = data?.user.role === 'admin'
 
   async function refresh(activeToken = token) {
     if (!activeToken) return
@@ -779,6 +797,10 @@ export function App() {
 
   useEffect(() => {
     refresh()
+  }, [])
+
+  useEffect(() => {
+    return () => jobWatchAbortRef.current?.abort()
   }, [])
 
   useEffect(() => {
@@ -908,6 +930,9 @@ export function App() {
   }
 
   async function runGenerationJob(unit: Unit, body: Record<string, unknown>) {
+    jobWatchAbortRef.current?.abort()
+    const controller = new AbortController()
+    jobWatchAbortRef.current = controller
     const started = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/units/${unit.id}/generate-job`, token, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -915,7 +940,7 @@ export function App() {
     updateUnitState(started.unit)
 
     let current = started
-    for (let attempt = 0; attempt < 240; attempt += 1) {
+    for (let attempt = 0; attempt < 240 && !controller.signal.aborted; attempt += 1) {
       if (current.job.status === 'succeeded' && current.unit?.content) {
         updateUnitState(current.unit)
         return current.unit
@@ -926,7 +951,8 @@ export function App() {
       if (current.job.status === 'canceled') {
         throw new Error('生成任务已取消')
       }
-      await delay(1500)
+      await abortableDelay(1500, controller.signal)
+      if (controller.signal.aborted) throw new Error('生成轮询已取消')
       current = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${started.job.id}`, token)
       if (current.unit) updateUnitState(current.unit)
     }
@@ -949,9 +975,13 @@ export function App() {
   }
 
   async function watchJobs(jobs: GenerationJob[]) {
+    jobWatchAbortRef.current?.abort()
+    const controller = new AbortController()
+    jobWatchAbortRef.current = controller
     const pending = new Map(jobs.map((job) => [job.id, job]))
-    for (let attempt = 0; attempt < 240 && pending.size > 0; attempt += 1) {
-      await delay(1500)
+    for (let attempt = 0; attempt < 240 && pending.size > 0 && !controller.signal.aborted; attempt += 1) {
+      await abortableDelay(1500, controller.signal)
+      if (controller.signal.aborted) break
       for (const jobId of [...pending.keys()]) {
         try {
           const result = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${jobId}`, token)
@@ -962,10 +992,11 @@ export function App() {
         }
       }
     }
-    refresh()
+    if (!controller.signal.aborted) refresh()
   }
 
   async function logout() {
+    jobWatchAbortRef.current?.abort()
     try {
       await requestJson('/api/logout', token, { method: 'POST', body: JSON.stringify({}) })
     } catch {
@@ -997,6 +1028,7 @@ export function App() {
     <div className="app-shell">
       <Sidebar
         user={data.user}
+        isAdmin={isAdmin}
         view={view}
         onNavigate={setView}
         onLogout={logout}
@@ -1005,6 +1037,7 @@ export function App() {
         <TopBar
           view={view}
           user={data.user}
+          isAdmin={isAdmin}
           onNavigate={setView}
           installPrompt={installPrompt}
           onInstall={installApp}
@@ -1109,14 +1142,14 @@ export function App() {
           />
         )}
 
-        {view === 'services' && (
+        {view === 'services' && isAdmin && (
           <ServicesView
             token={token}
             onError={setError}
           />
         )}
 
-        {view === 'admin' && (
+        {view === 'admin' && isAdmin && (
           <AdminView
             token={token}
             onNavigate={setView}
@@ -1446,26 +1479,29 @@ function LoadingScreen() {
 
 function Sidebar({
   user,
+  isAdmin,
   view,
   onNavigate,
   onLogout,
 }: {
   user: UserProfile
+  isAdmin: boolean
   view: View
   onNavigate: (view: View) => void
   onLogout: () => void
 }) {
-  const items: Array<{ view: View; label: string; icon: typeof Home }> = [
+  const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
     { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
-    { view: 'services', label: '服务', icon: Server },
-    { view: 'admin', label: '后台', icon: ShieldCheck },
+    { view: 'services', label: '服务', icon: Server, adminOnly: true },
+    { view: 'admin', label: '后台', icon: ShieldCheck, adminOnly: true },
     { view: 'settings', label: '设置', icon: Settings },
   ]
+  const items = allItems.filter((item) => !item.adminOnly || isAdmin)
 
   return (
     <aside className="sidebar">
@@ -1503,12 +1539,14 @@ function Sidebar({
 function TopBar({
   view,
   user,
+  isAdmin,
   onNavigate,
   installPrompt,
   onInstall,
 }: {
   view: View
   user: UserProfile
+  isAdmin: boolean
   onNavigate: (view: View) => void
   installPrompt: BeforeInstallPromptEvent | null
   onInstall: () => void
@@ -1526,17 +1564,18 @@ function TopBar({
     admin: '管理后台',
     settings: '设置',
   }
-  const items: Array<{ view: View; label: string; icon: typeof Home }> = [
+  const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
     { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
-    { view: 'services', label: '服务', icon: Server },
-    { view: 'admin', label: '后台', icon: ShieldCheck },
+    { view: 'services', label: '服务', icon: Server, adminOnly: true },
+    { view: 'admin', label: '后台', icon: ShieldCheck, adminOnly: true },
     { view: 'settings', label: '设置', icon: Settings },
   ]
+  const items = allItems.filter((item) => !item.adminOnly || isAdmin)
   const installLabel = isAndroidBrowser() ? '安装到手机' : '安装'
 
   return (

@@ -174,7 +174,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 管理后台集中显示任务统计、失败类型、备份状态、AI 服务状态、存储占用和最近错误日志。任务中心支持按任务类型和失败原因过滤。
 
-生成、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。
+上传、生成、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_UPLOAD_MAX`、`RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。服务状态和管理后台接口仅管理员可访问。
 
 ## 生词本
 
@@ -186,6 +186,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 ```bash
 ALLOW_SIGNUP=false
+PASSWORD_MIN_LENGTH=8
 ```
 
 如需允许新账号注册，可以配置邀请码：
@@ -207,6 +208,18 @@ INITIAL_ADMIN_PASSWORD=初始密码
 SESSION_DAYS=30
 LOGIN_WINDOW_MINUTES=10
 LOGIN_MAX_FAILURES=8
+```
+
+上传和 OCR 保护：
+
+```bash
+MAX_UPLOAD_MB=50
+MAX_EPUB_UPLOAD_MB=50
+MAX_PDF_UPLOAD_MB=50
+MAX_EPUB_EXPANDED_MB=200
+MAX_EPUB_ENTRIES=2000
+MAX_ACTIVE_OCR_TASKS=1
+RATE_LIMIT_UPLOAD_MAX=8
 ```
 
 ## 存储模式
@@ -244,4 +257,13 @@ npm run smoke
 ```bash
 npm run backup
 npm run restore -- ./backups/linguashelf.zip
+```
+
+如果备份会同步到云盘或下载到其他设备，建议配置加密备份：
+
+```bash
+BACKUP_ENCRYPTION_KEY=一段足够长的随机口令
+BACKUP_ENCRYPTION_REQUIRED=true
+npm run backup
+npm run restore -- ./backups/linguashelf-xxxx.zip.enc
 ```
