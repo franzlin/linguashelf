@@ -49,6 +49,7 @@ const pdfOcrVisionBaseUrl = openAiCompatibleBaseUrl(process.env.PDF_OCR_VISION_B
 const pdfOcrVisionApiKey = String(process.env.PDF_OCR_VISION_API_KEY || process.env.GEMINI_TTS_API_KEY || '')
 const pdfOcrVisionDpi = Math.max(90, Math.min(220, Number(process.env.PDF_OCR_VISION_DPI || 110)))
 const pdfOcrVisionMinWords = Math.max(10, Number(process.env.PDF_OCR_VISION_MIN_WORDS || 40))
+const pdfSectionTargetWords = Math.max(1200, Number(process.env.PDF_SECTION_TARGET_WORDS || 3400))
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MINUTES || 60) * 60 * 1000
 const podcastLexileDefault = Number(process.env.PODCAST_LEXILE_DEFAULT || 900)
 const podcastLexileMin = 500
@@ -931,6 +932,21 @@ function cleanPdfHeading(line, fallback) {
   )
 }
 
+function formatPdfPageRange(startPage, endPage = startPage) {
+  const start = Number(startPage || 0)
+  const end = Number(endPage || start)
+  if (!start) return ''
+  return start === end ? `原文页码 ${start}` : `原文页码 ${start}-${end}`
+}
+
+function pdfSectionTitle(index) {
+  return `PDF 区块 ${index}`
+}
+
+function isGenericPdfSectionTitle(title) {
+  return /^PDF 区块 \d+$/i.test(String(title || '').trim())
+}
+
 function collectRepeatedPdfLines(pages) {
   const counts = new Map()
   for (const page of pages) {
@@ -972,9 +988,9 @@ function cleanPdfPages(resultPages) {
     return {
       ...page,
       lines,
-      title: `Pages ${page.page}`,
+      title: '',
       text,
-      label: `Page ${page.page}`,
+      label: formatPdfPageRange(page.page, page.page),
       wordCount: wordCount(text),
     }
   })
@@ -1025,7 +1041,7 @@ function splitPdfPageIntoSections(page) {
   for (const line of page.lines) {
     if (isPdfChapterHeading(line)) {
       flush()
-      currentTitle = cleanPdfHeading(line, `Pages ${page.page}`)
+      currentTitle = cleanPdfHeading(line, '')
       continue
     }
     currentLines.push(line)
@@ -1281,15 +1297,20 @@ function normalizeOcrText(text) {
 function groupPdfPages(pages) {
   const chapters = []
   let current = null
+  let sequence = 0
 
   function startChapter(title, text, page) {
+    sequence += 1
+    const cleanHeading = cleanTitle(title, '')
     current = {
       id: nanoid(),
-      title: cleanTitle(title, `Pages ${page.page}`),
+      title: cleanHeading || pdfSectionTitle(sequence),
       text,
-      label: `Page ${page.page}`,
+      label: cleanHeading || pdfSectionTitle(sequence),
       startPage: page.page,
       endPage: page.page,
+      pageLabel: formatPdfPageRange(page.page, page.page),
+      sequence,
       wordCount: wordCount(text),
     }
     chapters.push(current)
@@ -1298,7 +1319,7 @@ function groupPdfPages(pages) {
   function appendToCurrent(text, page) {
     current.text = normalizeText(`${current.text}\n\n${text}`)
     current.endPage = page.page
-    current.label = current.startPage === current.endPage ? `Page ${current.startPage}` : `Pages ${current.startPage}-${current.endPage}`
+    current.pageLabel = formatPdfPageRange(current.startPage, current.endPage)
     current.wordCount = wordCount(current.text)
   }
 
@@ -1307,9 +1328,9 @@ function groupPdfPages(pages) {
       const text = normalizeText(section.text)
       if (wordCount(text) < 40 && !section.title) continue
       const hasHeading = Boolean(section.title)
-      if (!current || hasHeading || wordCount(current.text) > 2600) {
-        const title = section.title || `Pages ${page.page}`
-        startChapter(title, text, page)
+      const currentIsFull = current && wordCount(current.text) >= pdfSectionTargetWords
+      if (!current || hasHeading || currentIsFull) {
+        startChapter(section.title, text, page)
       } else {
         appendToCurrent(text, page)
       }
@@ -1320,38 +1341,24 @@ function groupPdfPages(pages) {
     .filter((chapter) => wordCount(chapter.text) >= 120)
     .map((chapter) => ({
       ...chapter,
-      title: cleanTitle(chapter.title, chapter.label),
-      label: chapter.startPage === chapter.endPage ? `Page ${chapter.startPage}` : `Pages ${chapter.startPage}-${chapter.endPage}`,
+      title: cleanTitle(chapter.title, pdfSectionTitle(chapter.sequence)),
+      label: cleanTitle(chapter.label, pdfSectionTitle(chapter.sequence)),
+      pageLabel: formatPdfPageRange(chapter.startPage, chapter.endPage),
       wordCount: wordCount(chapter.text),
     }))
 }
 
-function legacyGroupPdfPages(pages) {
-  const chapters = []
-  let current = null
+function pdfUnitSourceLocation(chapter, partCount, partIndex) {
+  const title = cleanTitle(chapter.title, chapter.label || '')
+  const pageLabel = chapter.pageLabel || formatPdfPageRange(chapter.startPage, chapter.endPage)
+  const main = title && !isGenericPdfSectionTitle(title) ? title : chapter.label || title || pdfSectionTitle(chapter.sequence || 1)
+  const location = [main, pageLabel].filter(Boolean).join(' · ')
+  return partCount > 1 ? `${location}，第 ${partIndex + 1} 部分` : location
+}
 
-  for (const page of pages) {
-    if (!current || wordCount(current.text) > 2200) {
-      current = {
-        id: nanoid(),
-        title: `Pages ${page.page}`,
-        text: page.text,
-        label: `Page ${page.page}`,
-        startPage: page.page,
-        endPage: page.page,
-        wordCount: wordCount(page.text),
-      }
-      chapters.push(current)
-    } else {
-      current.text = normalizeText(`${current.text}\n\n${page.text}`)
-      current.endPage = page.page
-      current.label = `Pages ${current.startPage}-${current.endPage}`
-      current.title = current.label
-      current.wordCount = wordCount(current.text)
-    }
-  }
-
-  return chapters
+function unitTitleFallback(chapter, sourceType) {
+  if (sourceType === 'pdf' && isGenericPdfSectionTitle(chapter.title)) return 'Reading Unit'
+  return chapter.title
 }
 
 function planUnits(bookId, chapters, sourceType) {
@@ -1362,10 +1369,10 @@ function planUnits(bookId, chapters, sourceType) {
   for (const chapter of studyChapters) {
     const parts = splitIntoSourceUnits(chapter.text, 1700)
     parts.forEach((sourceText, index) => {
-      const title = inferEnglishTitle(sourceText, chapter.title, index)
+      const title = inferEnglishTitle(sourceText, unitTitleFallback(chapter, sourceType), index)
       const location =
         sourceType === 'pdf'
-          ? `${chapter.label}${parts.length > 1 ? `, section ${index + 1}` : ''}`
+          ? pdfUnitSourceLocation(chapter, parts.length, index)
           : `${chapter.title}${parts.length > 1 ? `, section ${index + 1}` : ''}`
 
       units.push({

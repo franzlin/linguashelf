@@ -62,6 +62,7 @@ PDF_OCR_LANGUAGE=eng
 PDF_OCR_DPI=220
 PDF_OCR_MAX_PAGES=120
 PDF_OCR_COMMAND_TIMEOUT_MS=120000
+PDF_SECTION_TARGET_WORDS=3400
 MAX_EPUB_EXPANDED_MB=200
 MAX_EPUB_ENTRIES=2000
 RATE_LIMIT_WINDOW_MINUTES=60
@@ -138,7 +139,7 @@ PODCAST_TTS_CHUNK_CHARS=8000
 
 OCR 会优先使用视觉模型 `hunyuan-ocr`，失败或识别正文太少时自动回退到本地 `tesseract-ocr`。如果未单独配置 `PDF_OCR_VISION_BASE_URL` / `PDF_OCR_VISION_API_KEY`，会复用 `GEMINI_TTS_BASE_URL` / `GEMINI_TTS_API_KEY`。本地兜底 OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
 
-解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；PDF 会优先抽取可复制文字，失败时使用 OCR，并自动清理重复页眉页脚、页码，再用章节标题启发式拆分。
+解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；PDF 会优先抽取可复制文字，失败时使用 OCR，并自动清理重复页眉页脚、页码。PDF 的页码只作为来源定位，不作为学习单元划分依据；系统会优先按章节标题拆分，识别不到章节时按连续正文区块和词数拆分，区块目标大小可通过 `PDF_SECTION_TARGET_WORDS` 调整。
 
 书籍导入后可以在书籍详情页重命名，避免标题只跟随原始文件名或解析出的元数据。
 
