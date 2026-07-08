@@ -101,6 +101,7 @@ const defaultDb = {
   jobs: [],
   podcasts: [],
   serviceChecks: [],
+  errorLogs: [],
 }
 
 let sqliteDb = null
@@ -3194,6 +3195,84 @@ function keywordOverlapScore(readingText, sourceItem) {
   return overlap / Math.max(4, Math.min(readingKeywords.size, sourceItem.keywords.size))
 }
 
+function textKeywordSimilarity(a, b) {
+  const left = new Set(extractKeywords(a, 24))
+  const right = new Set(extractKeywords(b, 24))
+  if (!left.size || !right.size) return 0
+  let overlap = 0
+  for (const word of left) {
+    if (right.has(word)) overlap += 1
+  }
+  return overlap / Math.max(1, Math.min(left.size, right.size))
+}
+
+function normalizeClaimText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s'-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function normalizeSuspiciousSentence(item) {
+  if (!item) return null
+  if (typeof item === 'string') {
+    return { readingParagraph: 0, sentence: item, reason: 'AI 审稿认为这句话可能缺少原文支持', sourceParagraphs: [] }
+  }
+  const sentence = String(item.sentence || item.claim || '').trim()
+  if (!sentence) return null
+  return {
+    readingParagraph: Number(item.readingParagraph || 0),
+    sentence,
+    reason: String(item.reason || 'AI 审稿认为这句话可能缺少原文支持'),
+    sourceParagraphs: Array.isArray(item.sourceParagraphs) ? item.sourceParagraphs.map(String) : [],
+  }
+}
+
+function suspiciousSentencesForParagraph(content, audit, paragraphIndex) {
+  const paragraph = content?.reading?.paragraphs?.[paragraphIndex]
+  const sentences = splitSentences(paragraph?.text || '')
+  if (!sentences.length) return []
+
+  const candidates = [
+    ...((audit?.suspiciousSentences || []).map(normalizeSuspiciousSentence).filter(Boolean)),
+    ...((audit?.unsupportedClaims || []).map(normalizeSuspiciousSentence).filter(Boolean)),
+  ]
+  const output = []
+  for (const candidate of candidates) {
+    const requestedIndex = Number(candidate.readingParagraph || 0)
+    let bestSentence = ''
+    let bestScore = 0
+    const claim = normalizeClaimText(candidate.sentence)
+    for (const sentence of sentences) {
+      const normalizedSentence = normalizeClaimText(sentence)
+      const direct = claim && normalizedSentence.includes(claim.slice(0, Math.min(80, claim.length))) ? 1 : 0
+      const score = Math.max(direct, textKeywordSimilarity(candidate.sentence, sentence))
+      if (score > bestScore) {
+        bestScore = score
+        bestSentence = sentence
+      }
+    }
+    const matchesRequestedParagraph = !requestedIndex || requestedIndex === paragraphIndex + 1
+    if (bestSentence && matchesRequestedParagraph && bestScore >= 0.18) {
+      output.push({
+        sentence: bestSentence,
+        reason: candidate.reason,
+        sourceParagraphs: candidate.sourceParagraphs,
+        confidence: Number(bestScore.toFixed(2)),
+      })
+    }
+  }
+
+  const seen = new Set()
+  return output.filter((item) => {
+    const key = normalizeClaimText(item.sentence)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function mapReadingToSource(content, unit) {
   const sourceItems = sourceParagraphs(unit)
   const paragraphs = content?.reading?.paragraphs || []
@@ -3203,8 +3282,14 @@ function mapReadingToSource(content, unit) {
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, 2)
+    const confidence = ranked[0]?.score || 0
+    const suspiciousSentences = suspiciousSentencesForParagraph(content, content?.qualityAudit, index)
+    const status = !ranked.length || confidence < 0.12 || suspiciousSentences.length ? 'review' : 'ok'
     const output = {
       readingParagraph: index + 1,
+      status,
+      confidence: Number(confidence.toFixed(2)),
+      suspiciousSentences,
       sourceRefs: ranked.map(({ source, score }) => ({
         id: `${unit.id}-map-${index + 1}-${source.index + 1}`,
         label: `${unit.sourceLocation}, 段落 ${source.index + 1}`,
@@ -3236,6 +3321,7 @@ function localFidelityAudit(content, unit) {
     verdict: risks.length ? '需要复核来源忠实度' : '本地检查未发现明显忠实度问题',
     risks,
     unsupportedClaims: [],
+    suspiciousSentences: [],
     missingImportantIdeas,
     sourceAlignedParagraphs: sourceMap.map((item) => ({
       readingParagraph: item.readingParagraph,
@@ -3253,6 +3339,20 @@ const fidelityAuditSchema = {
     verdict: { type: 'string' },
     risks: { type: 'array', items: { type: 'string' } },
     unsupportedClaims: { type: 'array', items: { type: 'string' } },
+    suspiciousSentences: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          readingParagraph: { type: 'number' },
+          sentence: { type: 'string' },
+          reason: { type: 'string' },
+          sourceParagraphs: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['readingParagraph', 'sentence', 'reason', 'sourceParagraphs'],
+      },
+    },
     missingImportantIdeas: { type: 'array', items: { type: 'string' } },
     sourceAlignedParagraphs: {
       type: 'array',
@@ -3268,7 +3368,7 @@ const fidelityAuditSchema = {
       },
     },
   },
-  required: ['score', 'verdict', 'risks', 'unsupportedClaims', 'missingImportantIdeas', 'sourceAlignedParagraphs'],
+  required: ['score', 'verdict', 'risks', 'unsupportedClaims', 'suspiciousSentences', 'missingImportantIdeas', 'sourceAlignedParagraphs'],
 }
 
 async function auditContentFidelity(content, unit) {
@@ -3303,6 +3403,7 @@ Compare the source excerpts and generated lesson.
 Rules:
 - Score 1.0 means fully faithful; 0.0 means mostly unsupported.
 - List unsupported claims only if the lesson says something not supported by the source.
+- In suspiciousSentences, copy the exact generated sentence when a specific sentence is unsupported or weakly supported.
 - List important missing ideas only if they are central to the source excerpt.
 - Map each generated reading paragraph to the best matching source paragraph labels when possible.
 
@@ -3553,6 +3654,193 @@ async function buildGeneratedContent(unit, generationSettings) {
   return content
 }
 
+const paragraphRepairSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    paragraphs: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          readingParagraph: { type: 'number' },
+          text: { type: 'string' },
+          summaryZh: { type: 'string' },
+        },
+        required: ['readingParagraph', 'text', 'summaryZh'],
+      },
+    },
+  },
+  required: ['paragraphs'],
+}
+
+function sourceIndexesFromRefs(refs = []) {
+  return refs
+    .map((ref) => Number(String(ref?.label || '').match(/段落\s*(\d+)/)?.[1]))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => value - 1)
+}
+
+function sourceContextForReadingParagraph(unit, sourceMapItem, paragraphIndex, totalParagraphs) {
+  const paragraphs = sourceParagraphs(unit)
+  if (!paragraphs.length) return ''
+  const indexSet = new Set(sourceIndexesFromRefs(sourceMapItem?.sourceRefs || []))
+  if (!indexSet.size) {
+    const approx = Math.min(paragraphs.length - 1, Math.max(0, Math.round((paragraphIndex / Math.max(1, totalParagraphs - 1)) * (paragraphs.length - 1))))
+    indexSet.add(approx)
+    if (approx > 0) indexSet.add(approx - 1)
+    if (approx < paragraphs.length - 1) indexSet.add(approx + 1)
+  }
+  return [...indexSet]
+    .sort((a, b) => a - b)
+    .map((index) => {
+      const item = paragraphs[index]
+      return item ? `Source paragraph ${item.index + 1}:\n${takeWords(item.text, 220)}` : ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function lowQualityParagraphIndexes(unit, requested = []) {
+  const paragraphCount = unit?.content?.reading?.paragraphs?.length || 0
+  const validRequested = requested
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 1 && value <= paragraphCount)
+    .map((value) => value - 1)
+  if (validRequested.length) return [...new Set(validRequested)]
+
+  const sourceMap = unit?.quality?.sourceMap || []
+  const audit = unit?.quality?.fidelity?.audit || {}
+  const suspicious = (audit.suspiciousSentences || [])
+    .map((item) => Number(item?.readingParagraph || 0) - 1)
+    .filter((value) => value >= 0)
+  const fromMap = sourceMap
+    .filter((item) => item.status === 'review' || !item.sourceRefs?.length || Number(item.confidence || 0) < 0.12 || item.suspiciousSentences?.length)
+    .map((item) => Number(item.readingParagraph || 0) - 1)
+    .filter((value) => value >= 0)
+  const indexes = [...new Set([...fromMap, ...suspicious])]
+  if (indexes.length) return indexes.slice(0, 3)
+  if (audit.score !== undefined && Number(audit.score) < 0.55) return [0]
+  return []
+}
+
+function fallbackRepairParagraph(unit, paragraphIndex) {
+  const current = unit.content?.reading?.paragraphs?.[paragraphIndex] || {}
+  const sourceMapItem = (unit.quality?.sourceMap || []).find((item) => Number(item.readingParagraph || 0) === paragraphIndex + 1)
+  const context = sourceContextForReadingParagraph(unit, sourceMapItem, paragraphIndex, unit.content?.reading?.paragraphs?.length || 1)
+  const sentences = splitSentences(context).slice(0, 6)
+  const text = sentences.length
+    ? sentences.join(' ')
+    : takeWords(context || current.text || unit.sourceExcerpt || unit.sourceText, 155)
+  return {
+    readingParagraph: paragraphIndex + 1,
+    text,
+    summaryZh: current.summaryZh || '这一段已按原文来源重新整理。',
+  }
+}
+
+async function repairParagraphsWithOpenAI(unit, indexes, settings) {
+  const provider = process.env.AI_PROVIDER || 'auto'
+  const apiKey = process.env.OPENAI_API_KEY
+  if (provider === 'mock' || !apiKey) return null
+
+  const sourceMap = unit.quality?.sourceMap || []
+  const paragraphCount = unit.content?.reading?.paragraphs?.length || 0
+  const targets = indexes.map((index) => {
+    const paragraph = unit.content.reading.paragraphs[index]
+    const sourceMapItem = sourceMap.find((item) => Number(item.readingParagraph || 0) === index + 1)
+    return `
+Reading paragraph ${index + 1}
+Current generated text:
+${paragraph.text}
+
+Known issues:
+${(sourceMapItem?.suspiciousSentences || []).map((item) => `- ${item.sentence}: ${item.reason}`).join('\n') || '- Weak or unclear source support.'}
+
+Allowed source context:
+${sourceContextForReadingParagraph(unit, sourceMapItem, index, paragraphCount)}
+`
+  }).join('\n\n---\n\n')
+
+  const model = process.env.OPENAI_MODEL || 'gpt-5.5'
+  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const response = await fetch(`${baseUrl}/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      store: false,
+      reasoning: { effort: process.env.OPENAI_REASONING_EFFORT || 'medium' },
+      instructions: 'You repair only selected paragraphs of a graded English lesson. Return only schema-valid JSON.',
+      input: `
+Repair the selected reading paragraphs only.
+
+Rules:
+- Keep the same reading paragraph numbers.
+- Rewrite only from the allowed source context shown for each paragraph.
+- Remove unsupported claims. Do not add background knowledge, opinions, examples, or facts not in the source context.
+- Keep adult learner English at CEFR ${settings.readingLevel}.
+- Each repaired paragraph should be 120-175 words.
+- Return a concise Chinese summary for each repaired paragraph.
+- Do not rewrite other parts of the lesson.
+
+${targets}
+`,
+      text: {
+        verbosity: process.env.OPENAI_VERBOSITY || 'medium',
+        format: {
+          type: 'json_schema',
+          name: 'paragraph_repair',
+          strict: true,
+          schema: paragraphRepairSchema,
+        },
+      },
+    }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`段落修复失败：${response.status} ${text.slice(0, 240)}`)
+  }
+  const text = getResponsesOutputText(await response.json())
+  if (!text) throw new Error('段落修复未返回内容')
+  return JSON.parse(text)
+}
+
+async function repairLowQualityParagraphs(unit, settings, requestedParagraphs = []) {
+  if (!unit?.content?.reading?.paragraphs?.length) throw new Error('这个单元还没有可修复的阅读正文')
+  const indexes = lowQualityParagraphIndexes(unit, requestedParagraphs)
+  if (!indexes.length) throw new Error('没有检测到需要段落级修复的问题')
+
+  let result = null
+  let aiError = ''
+  try {
+    result = await repairParagraphsWithOpenAI(unit, indexes, settings)
+  } catch (error) {
+    aiError = error.message || String(error)
+  }
+  const repairs = result?.paragraphs?.length ? result.paragraphs : indexes.map((index) => fallbackRepairParagraph(unit, index))
+  const nextContent = JSON.parse(JSON.stringify(unit.content))
+  const repairedIndexes = []
+  for (const repair of repairs) {
+    const index = Number(repair.readingParagraph || 0) - 1
+    if (!indexes.includes(index) || !nextContent.reading.paragraphs[index]) continue
+    nextContent.reading.paragraphs[index] = {
+      text: String(repair.text || '').trim() || nextContent.reading.paragraphs[index].text,
+      summaryZh: String(repair.summaryZh || '').trim() || nextContent.reading.paragraphs[index].summaryZh,
+    }
+    repairedIndexes.push(index)
+  }
+  if (!repairedIndexes.length) throw new Error('段落修复结果没有匹配到目标段落')
+  nextContent.fidelityNote = `${nextContent.fidelityNote || ''} Paragraph ${repairedIndexes.map((index) => index + 1).join(', ')} was repaired for stricter source fidelity. ${aiError ? `AI repair fallback note: ${aiError}` : ''}`.trim()
+  nextContent.qualityAudit = await auditContentFidelity(nextContent, unit)
+  return { content: nextContent, repairedParagraphs: repairedIndexes.map((index) => index + 1), aiError }
+}
+
 function saveUnitVersion(unit, reason = 'regenerated') {
   if (!unit?.content) return null
   unit.versions = Array.isArray(unit.versions) ? unit.versions : []
@@ -3703,6 +3991,45 @@ function markJobFailed(job, errorOrMessage, options = {}) {
   applyJobDiagnosis(job, job.error, options)
 }
 
+function appendErrorLog(db, entry = {}) {
+  if (!db) return null
+  db.errorLogs = Array.isArray(db.errorLogs) ? db.errorLogs : []
+  const now = new Date().toISOString()
+  const log = {
+    id: nanoid(),
+    level: entry.level || 'error',
+    scope: entry.scope || 'server',
+    message: sanitizeServiceMessage(entry.message || '未知错误'),
+    detail: sanitizeServiceMessage(entry.detail || ''),
+    userId: entry.userId || '',
+    jobId: entry.jobId || '',
+    unitId: entry.unitId || '',
+    podcastId: entry.podcastId || '',
+    statusCode: entry.statusCode || null,
+    errorCode: entry.errorCode || '',
+    createdAt: now,
+  }
+  db.errorLogs.push(log)
+  if (db.errorLogs.length > 200) db.errorLogs = db.errorLogs.slice(-200)
+  return log
+}
+
+function publicErrorLog(log) {
+  return {
+    id: log.id,
+    level: log.level || 'error',
+    scope: log.scope || 'server',
+    message: log.message || '',
+    detail: log.detail || '',
+    jobId: log.jobId || '',
+    unitId: log.unitId || '',
+    podcastId: log.podcastId || '',
+    statusCode: log.statusCode || null,
+    errorCode: log.errorCode || '',
+    createdAt: log.createdAt || '',
+  }
+}
+
 async function computeBackupStatus() {
   try {
     const entries = await fs.readdir(backupDir, { withFileTypes: true })
@@ -3751,6 +4078,127 @@ async function computeBackupStatus() {
       latestBackup: null,
       latestDrill: null,
     }
+  }
+}
+
+async function fileSizeIfExists(filePath) {
+  try {
+    const stat = await fs.stat(filePath)
+    return stat.isFile() ? stat.size : 0
+  } catch {
+    return 0
+  }
+}
+
+async function directoryUsage(dir, maxFiles = 2000) {
+  let bytes = 0
+  let files = 0
+  async function walk(current) {
+    if (files >= maxFiles) return
+    let entries = []
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (files >= maxFiles) return
+      const fullPath = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        await walk(fullPath)
+      } else if (entry.isFile()) {
+        try {
+          const stat = await fs.stat(fullPath)
+          bytes += stat.size
+          files += 1
+        } catch {
+          // Ignore files that disappear during the scan.
+        }
+      }
+    }
+  }
+  await walk(dir)
+  return { bytes, files, truncated: files >= maxFiles }
+}
+
+async function computeStorageUsage() {
+  const [uploads, audio, backups] = await Promise.all([
+    directoryUsage(uploadDir),
+    directoryUsage(audioDir),
+    directoryUsage(backupDir),
+  ])
+  const dbBytes = storageDriver === 'sqlite' ? await fileSizeIfExists(sqlitePath) : await fileSizeIfExists(dbPath)
+  const totalBytes = uploads.bytes + audio.bytes + backups.bytes + dbBytes
+  return {
+    totalBytes,
+    dataDir,
+    backupDir,
+    items: [
+      { key: 'database', label: storageDriver === 'sqlite' ? 'SQLite 数据库' : 'JSON 数据库', bytes: dbBytes, files: dbBytes ? 1 : 0 },
+      { key: 'uploads', label: '上传原文', ...uploads },
+      { key: 'audio', label: '音频缓存', ...audio },
+      { key: 'backups', label: '备份文件', ...backups },
+    ],
+  }
+}
+
+function taskSummary(db, userId) {
+  const jobs = db.jobs.filter((job) => job.userId === userId)
+  const byStatus = {}
+  const byType = {}
+  const failedByCode = {}
+  for (const job of jobs) {
+    byStatus[job.status] = (byStatus[job.status] || 0) + 1
+    byType[job.type] = (byType[job.type] || 0) + 1
+    if (job.status === 'failed') {
+      const code = job.errorCode || diagnoseJobError(job, job.error || job.message).errorCode || 'unknown'
+      failedByCode[code] = (failedByCode[code] || 0) + 1
+    }
+  }
+  return {
+    total: jobs.length,
+    active: jobs.filter((job) => ['queued', 'running', 'paused'].includes(job.status)).length,
+    failed: jobs.filter((job) => job.status === 'failed').length,
+    byStatus,
+    byType,
+    failedByCode,
+    recent: jobs
+      .slice()
+      .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+      .slice(0, 8)
+      .map((job) => publicJobWithContext(job, db)),
+  }
+}
+
+async function buildAdminStatusPayload(db, userId) {
+  const [backup, storage] = await Promise.all([computeBackupStatus(), computeStorageUsage()])
+  const services = buildAiServicesPayload(db, userId)
+  const recentErrors = (db.errorLogs || [])
+    .filter((log) => !log.userId || log.userId === userId)
+    .slice()
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, 20)
+    .map(publicErrorLog)
+  return {
+    updatedAt: new Date().toISOString(),
+    tasks: taskSummary(db, userId),
+    backup,
+    services: {
+      overview: services.overview,
+      items: services.services.map((service) => ({
+        id: service.id,
+        title: service.title,
+        status: service.status,
+        configured: service.configured,
+        provider: service.provider,
+        model: service.model,
+        endpointHost: service.endpointHost,
+        warning: service.warning || '',
+        lastCheck: service.lastCheck || null,
+      })),
+    },
+    storage,
+    recentErrors,
   }
 }
 
@@ -3938,6 +4386,18 @@ async function failPodcastJob(jobId, message, options = {}) {
     podcast.error = job.error || job.message
     podcast.updatedAt = job.updatedAt
   }
+  if (job.status === 'failed') {
+    appendErrorLog(db, {
+      scope: 'job',
+      message: job.error || job.message,
+      detail: job.errorHint || '',
+      userId: job.userId,
+      jobId: job.id,
+      podcastId: job.podcastId,
+      statusCode: job.statusCode,
+      errorCode: job.errorCode,
+    })
+  }
   await writeDb(db)
 }
 
@@ -4035,6 +4495,16 @@ async function processJobQueue() {
       const user = db.users.find((item) => item.id === job.userId)
       if (!unit || !user) {
         markJobFailed(job, '学习单元或用户不存在', { stage: 'setup' })
+        appendErrorLog(db, {
+          scope: 'job',
+          message: job.error || job.message,
+          detail: job.errorHint || '',
+          userId: job.userId,
+          jobId: job.id,
+          unitId: job.unitId,
+          statusCode: job.statusCode,
+          errorCode: job.errorCode,
+        })
         await writeDb(db)
         continue
       }
@@ -4087,6 +4557,16 @@ async function processJobQueue() {
 
       if (failure || !content) {
         markJobFailed(job, failure || 'AI 未返回学习单元', { stage: 'unit-generation' })
+        appendErrorLog(db, {
+          scope: 'job',
+          message: job.error || job.message,
+          detail: job.errorHint || '',
+          userId: job.userId,
+          jobId: job.id,
+          unitId: job.unitId,
+          statusCode: job.statusCode,
+          errorCode: job.errorCode,
+        })
         unit.generation = {
           ...(unit.generation || {}),
           jobId: job.id,
@@ -4378,6 +4858,10 @@ async function createApp() {
     }
     await writeDb(req.db)
     res.json({ check, ...buildAiServicesPayload(req.db, req.user.id) })
+  })
+
+  app.get('/api/admin/status', auth, async (req, res) => {
+    res.json(await buildAdminStatusPayload(req.db, req.user.id))
   })
 
   app.patch('/api/account/password', auth, async (req, res) => {
@@ -4791,6 +5275,39 @@ async function createApp() {
     }
   })
 
+  app.post('/api/units/:unitId/repair-paragraphs', auth, async (req, res, next) => {
+    try {
+      const db = req.db
+      const unit = db.units.find((item) => item.id === req.params.unitId)
+      const book = unit ? db.books.find((item) => item.id === unit.bookId && item.userId === req.user.id) : null
+      if (!unit || !book) {
+        res.status(404).json({ error: '未找到学习单元' })
+        return
+      }
+      if (shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
+      const requested = Array.isArray(req.body.paragraphs) ? req.body.paragraphs : []
+      const settings = generationSettingsFromBody(userSettings(db, req.user.id), req.body)
+      const repair = await repairLowQualityParagraphs(unit, settings, requested)
+      saveUnitVersion(unit, 'paragraph-repair')
+      unit.content = repair.content
+      unit.quality = assessContentQuality(unit.content, unit)
+      unit.sourceRefs = unit.quality.sourceRefs
+      unit.status = 'generated'
+      unit.generatedAt = new Date().toISOString()
+      unit.generation = {
+        ...(unit.generation || {}),
+        status: 'succeeded',
+        progress: 100,
+        message: `已修复阅读第 ${repair.repairedParagraphs.join('、')} 段`,
+        finishedAt: unit.generatedAt,
+      }
+      await writeDb(db)
+      res.json({ unit: publicUnit(unit, db, req.user.id), repairedParagraphs: repair.repairedParagraphs })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.post('/api/units/:unitId/generate-job', auth, async (req, res) => {
     const db = req.db
     const unit = db.units.find((item) => item.id === req.params.unitId)
@@ -4856,8 +5373,16 @@ async function createApp() {
   app.get('/api/jobs', auth, async (req, res) => {
     const db = req.db
     const status = String(req.query.status || '')
+    const type = String(req.query.type || '')
+    const errorCode = String(req.query.errorCode || '')
     const jobs = db.jobs
-      .filter((job) => job.userId === req.user.id && (!status || job.status === status))
+      .filter((job) => {
+        if (job.userId !== req.user.id) return false
+        if (status && job.status !== status) return false
+        if (type && job.type !== type) return false
+        if (errorCode && (job.errorCode || diagnoseJobError(job, job.error || job.message).errorCode) !== errorCode) return false
+        return true
+      })
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
       .slice(0, 100)
       .map((job) => publicJobWithContext(job, db))
@@ -5205,10 +5730,28 @@ async function createApp() {
     res.json({ ok: true })
   })
 
-  app.use((error, _req, res, _next) => {
+  app.use((error, req, res, _next) => {
     console.error(error)
     const statusValue = Number(error.status || error.statusCode || 500)
     const status = Number.isInteger(statusValue) && statusValue >= 400 && statusValue <= 599 ? statusValue : 500
+    if (status >= 500) {
+      ;(async () => {
+        try {
+          const db = req.db || (await readDb())
+          appendErrorLog(db, {
+            scope: 'server',
+            message: error.message || '服务器出现错误',
+            detail: `${req.method || ''} ${req.originalUrl || req.url || ''}`.trim(),
+            userId: req.user?.id || '',
+            statusCode: status,
+            errorCode: 'server-error',
+          })
+          await writeDb(db)
+        } catch (logError) {
+          console.error('failed to write error log', logError)
+        }
+      })()
+    }
     const message = status >= 500 && isProd ? '服务器出现错误' : error.message || '服务器出现错误'
     res.status(status).json({ error: message })
   })

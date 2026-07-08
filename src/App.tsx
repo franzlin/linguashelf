@@ -23,6 +23,7 @@ import {
   Play,
   RotateCcw,
   Server,
+  ShieldCheck,
   Settings,
   TrendingUp,
   Trash2,
@@ -32,7 +33,7 @@ import {
   X,
 } from 'lucide-react'
 
-type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'settings'
+type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'admin' | 'settings'
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
 type UserProfile = {
@@ -150,6 +151,14 @@ type Unit = {
     }>
     sourceMap?: Array<{
       readingParagraph: number
+      status?: 'ok' | 'review'
+      confidence?: number
+      suspiciousSentences?: Array<{
+        sentence: string
+        reason: string
+        sourceParagraphs?: string[]
+        confidence?: number
+      }>
       sourceRefs: Array<{
         id: string
         label: string
@@ -170,6 +179,12 @@ type Unit = {
         verdict: string
         risks: string[]
         unsupportedClaims: string[]
+        suspiciousSentences?: Array<{
+          readingParagraph: number
+          sentence: string
+          reason: string
+          sourceParagraphs: string[]
+        }>
         missingImportantIdeas: string[]
         error?: string
       }
@@ -492,6 +507,59 @@ type AiServicesPayload = {
   services: AiService[]
 }
 
+type AdminStatus = {
+  updatedAt: string
+  tasks: {
+    total: number
+    active: number
+    failed: number
+    byStatus: Record<string, number>
+    byType: Record<string, number>
+    failedByCode: Record<string, number>
+    recent: GenerationJob[]
+  }
+  backup: SecurityStatus['deployment']['backup']
+  services: {
+    overview: AiServicesPayload['overview']
+    items: Array<{
+      id: string
+      title: string
+      status: AiService['status']
+      configured: boolean
+      provider: string
+      model: string
+      endpointHost: string
+      warning?: string
+      lastCheck?: AiServiceCheck | null
+    }>
+  }
+  storage: {
+    totalBytes: number
+    dataDir: string
+    backupDir: string
+    items: Array<{
+      key: string
+      label: string
+      bytes: number
+      files: number
+      truncated?: boolean
+    }>
+  }
+  recentErrors: Array<{
+    id: string
+    level: string
+    scope: string
+    message: string
+    detail: string
+    jobId?: string
+    unitId?: string
+    podcastId?: string
+    statusCode?: number | null
+    errorCode?: string
+    createdAt: string
+  }>
+}
+
 type SelectedAid =
   | { kind: 'word'; word: string; detail?: VocabularyItem }
   | { kind: 'sentence'; sentence: string; summary: string }
@@ -638,6 +706,22 @@ function aiServiceIcon(service: AiService) {
   return Brain
 }
 
+function normalizeSentenceKey(value: string) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9\s'-]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function sourceMapForParagraph(unit: Unit, paragraphIndex: number) {
+  return (unit.quality?.sourceMap || []).find((item) => Number(item.readingParagraph || 0) === paragraphIndex + 1)
+}
+
+function suspiciousMatch(sentence: string, sourceMapItem?: NonNullable<NonNullable<Unit['quality']>['sourceMap']>[number]) {
+  const normalized = normalizeSentenceKey(sentence)
+  return (sourceMapItem?.suspiciousSentences || []).find((item) => {
+    const suspect = normalizeSentenceKey(item.sentence)
+    return Boolean(suspect && (normalized.includes(suspect) || suspect.includes(normalized) || normalized.split(' ').filter((word) => suspect.includes(word) && word.length > 4).length >= 3))
+  })
+}
+
 function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
@@ -751,6 +835,21 @@ export function App() {
       return result
     } catch (err) {
       setError(err instanceof Error ? err.message : '重生成失败')
+      return null
+    }
+  }
+
+  async function repairUnitParagraphs(unit: Unit, paragraphs?: number[]) {
+    try {
+      const result = await requestJson<{ unit: Unit; repairedParagraphs: number[] }>(`/api/units/${unit.id}/repair-paragraphs`, token, {
+        method: 'POST',
+        body: JSON.stringify({ paragraphs }),
+      })
+      updateUnitState(result.unit)
+      setError('')
+      return result.unit
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '段落修复失败')
       return null
     }
   }
@@ -970,6 +1069,7 @@ export function App() {
               refresh()
             }}
             onRegenerateUnit={regenerateUnit}
+            onRepairUnitParagraphs={repairUnitParagraphs}
             onUnitUpdated={updateUnitState}
             onRestoreVersion={restoreUnitVersion}
             onError={setError}
@@ -1004,6 +1104,14 @@ export function App() {
         {view === 'services' && (
           <ServicesView
             token={token}
+            onError={setError}
+          />
+        )}
+
+        {view === 'admin' && (
+          <AdminView
+            token={token}
+            onNavigate={setView}
             onError={setError}
           />
         )}
@@ -1347,6 +1455,7 @@ function Sidebar({
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
     { view: 'services', label: '服务', icon: Server },
+    { view: 'admin', label: '后台', icon: ShieldCheck },
     { view: 'settings', label: '设置', icon: Settings },
   ]
 
@@ -1406,6 +1515,7 @@ function TopBar({
     vocabulary: '生词本',
     tasks: '任务',
     services: 'AI 服务',
+    admin: '管理后台',
     settings: '设置',
   }
   const items: Array<{ view: View; label: string; icon: typeof Home }> = [
@@ -1416,6 +1526,7 @@ function TopBar({
     { view: 'vocabulary', label: '生词', icon: BookMarked },
     { view: 'tasks', label: '任务', icon: ListChecks },
     { view: 'services', label: '服务', icon: Server },
+    { view: 'admin', label: '后台', icon: ShieldCheck },
     { view: 'settings', label: '设置', icon: Settings },
   ]
   const installLabel = isAndroidBrowser() ? '安装到手机' : '安装'
@@ -2286,6 +2397,7 @@ function StudyView({
   onBack,
   onCompleted,
   onRegenerateUnit,
+  onRepairUnitParagraphs,
   onUnitUpdated,
   onRestoreVersion,
   onError,
@@ -2295,6 +2407,7 @@ function StudyView({
   onBack: () => void
   onCompleted: (report: Report) => void
   onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) => Promise<Unit | null>
+  onRepairUnitParagraphs: (unit: Unit, paragraphs?: number[]) => Promise<Unit | null>
   onUnitUpdated: (unit: Unit) => void
   onRestoreVersion: (unit: Unit, versionId: string) => Promise<Unit>
   onError: (message: string) => void
@@ -2311,6 +2424,7 @@ function StudyView({
   const [audioLoading, setAudioLoading] = useState(false)
   const [restoringVersionId, setRestoringVersionId] = useState('')
   const [regeneratingFaithful, setRegeneratingFaithful] = useState(false)
+  const [repairingParagraphs, setRepairingParagraphs] = useState(false)
   const [showQualityIssues, setShowQualityIssues] = useState(false)
   const [dynamicDefinitions, setDynamicDefinitions] = useState<Record<string, VocabularyItem>>({})
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -2322,7 +2436,11 @@ function StudyView({
   const unsupportedClaims = qualityAudit?.unsupportedClaims || []
   const missingImportantIdeas = qualityAudit?.missingImportantIdeas || []
   const lowFidelityScore = qualityAudit?.score !== undefined && Number(qualityAudit.score) < 0.6
-  const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length)
+  const lowQualitySourceMapItems = (unit.quality?.sourceMap || []).filter(
+    (item) => item.status === 'review' || !item.sourceRefs.length || Number(item.confidence || 0) < 0.12 || Boolean(item.suspiciousSentences?.length)
+  )
+  const lowQualityParagraphNumbers = lowQualitySourceMapItems.map((item) => Number(item.readingParagraph || 0)).filter(Boolean)
+  const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length || lowQualitySourceMapItems.length)
   const latestVersion = (unit.versions || [])[unit.versions?.length ? unit.versions.length - 1 : -1]
 
   useEffect(() => {
@@ -2665,6 +2783,22 @@ function StudyView({
     }
   }
 
+  async function repairQualityParagraphs(paragraphs = lowQualityParagraphNumbers) {
+    if (!content) return
+    setRepairingParagraphs(true)
+    try {
+      const repaired = await onRepairUnitParagraphs(unit, paragraphs)
+      if (repaired) {
+        onUnitUpdated(repaired)
+        setShowQualityIssues(false)
+      }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '段落修复失败')
+    } finally {
+      setRepairingParagraphs(false)
+    }
+  }
+
   async function restoreLatestVersion() {
     if (!latestVersion?.id) return
     await restoreVersion(latestVersion.id)
@@ -2713,6 +2847,10 @@ function StudyView({
                   <ListChecks size={16} />
                   查看疑点
                 </button>
+                <button type="button" className="primary-button" onClick={() => repairQualityParagraphs()} disabled={repairingParagraphs || !lowQualityParagraphNumbers.length}>
+                  {repairingParagraphs ? <Loader2 className="spin" size={16} /> : <Pencil size={16} />}
+                  只修复低质量段落
+                </button>
                 <button type="button" className="primary-button" onClick={regenerateFaithfulVersion} disabled={regeneratingFaithful}>
                   {regeneratingFaithful ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
                   重新生成更忠实版本
@@ -2737,6 +2875,15 @@ function StudyView({
                 <strong>需要优先核对的疑点</strong>
                 {unsupportedClaims.length > 0 && <p>疑似未受原文支持：{unsupportedClaims.join('；')}</p>}
                 {missingImportantIdeas.length > 0 && <p>可能遗漏原文重点：{missingImportantIdeas.join('；')}</p>}
+                {lowQualitySourceMapItems.some((item) => item.suspiciousSentences?.length) && (
+                  <p>
+                    具体可疑句子：
+                    {lowQualitySourceMapItems
+                      .flatMap((item) => (item.suspiciousSentences || []).map((sentence) => `第 ${item.readingParagraph} 段：${sentence.sentence}`))
+                      .slice(0, 6)
+                      .join('；')}
+                  </p>
+                )}
                 {(unit.quality.sourceMap || []).some((item) => !item.sourceRefs.length) && (
                   <p>
                     缺少明确来源映射：
@@ -2762,14 +2909,31 @@ function StudyView({
               <details className="nested-details">
                 <summary>逐段来源映射</summary>
                 {(unit.quality.sourceMap || []).map((item) => (
-                  <div key={`source-map-${item.readingParagraph}`} className="source-map-item">
-                    <strong>阅读第 {item.readingParagraph} 段</strong>
+                  <div key={`source-map-${item.readingParagraph}`} className={item.status === 'review' ? 'source-map-item review' : 'source-map-item'}>
+                    <div className="source-map-head">
+                      <strong>阅读第 {item.readingParagraph} 段</strong>
+                      <span className={`status-pill ${item.status === 'review' ? 'failed' : 'completed'}`}>{item.status === 'review' ? '需复核' : '已映射'}</span>
+                      {item.confidence !== undefined && <span>置信度 {formatPercent(item.confidence || 0)}</span>}
+                      {item.status === 'review' && (
+                        <button type="button" onClick={() => repairQualityParagraphs([item.readingParagraph])} disabled={repairingParagraphs}>
+                          {repairingParagraphs ? <Loader2 className="spin" size={16} /> : <Pencil size={16} />}
+                          修复本段
+                        </button>
+                      )}
+                    </div>
                     {item.sourceRefs.length ? (
                       item.sourceRefs.map((ref) => (
                         <p key={ref.id}>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}：{ref.excerpt}</p>
                       ))
                     ) : (
                       <p>{item.note || '未找到明显对应来源段落'}</p>
+                    )}
+                    {(item.suspiciousSentences || []).length > 0 && (
+                      <div className="suspicious-list">
+                        {(item.suspiciousSentences || []).map((sentence, index) => (
+                          <p key={`${sentence.sentence}-${index}`}>可疑句子：{sentence.sentence}（{sentence.reason}）</p>
+                        ))}
+                      </div>
                     )}
                   </div>
                 ))}
@@ -2839,42 +3003,73 @@ function StudyView({
               <h2>分级阅读</h2>
             </div>
           </div>
-          {content.reading.paragraphs.map((paragraph, paragraphIndex) => (
-            <article
-              key={`${paragraph.text}-${paragraphIndex}`}
-              className={paragraphIndex === currentParagraph ? 'reading-paragraph current' : paragraphIndex < currentParagraph ? 'reading-paragraph seen' : 'reading-paragraph'}
-              data-paragraph-index={paragraphIndex}
-            >
-              <p>
-                {splitSentences(paragraph.text).map((sentence, sentenceIndex) => (
-                  <span
-                    key={`${sentence}-${sentenceIndex}`}
-                    role="button"
-                    tabIndex={0}
-                    className="sentence"
-                    onClick={() => setAid({ kind: 'sentence', sentence, summary: paragraph.summaryZh })}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') setAid({ kind: 'sentence', sentence, summary: paragraph.summaryZh })
-                    }}
-                  >
-                    {renderWords(sentence, vocabularyMap, openWord)}
-                    {' '}
-                  </span>
-                ))}
-              </p>
-              <button
-                className="summary-button"
-                type="button"
-                onClick={() => setShowSummaries((value) => ({ ...value, [paragraphIndex]: !value[paragraphIndex] }))}
+          {content.reading.paragraphs.map((paragraph, paragraphIndex) => {
+            const sourceMapItem = sourceMapForParagraph(unit, paragraphIndex)
+            const needsParagraphReview = sourceMapItem?.status === 'review'
+            return (
+              <article
+                key={`${paragraph.text}-${paragraphIndex}`}
+                className={`${paragraphIndex === currentParagraph ? 'reading-paragraph current' : paragraphIndex < currentParagraph ? 'reading-paragraph seen' : 'reading-paragraph'}${needsParagraphReview ? ' needs-review' : ''}`}
+                data-paragraph-index={paragraphIndex}
               >
-                {showSummaries[paragraphIndex] ? '隐藏段落摘要' : '段落摘要'}
-              </button>
-              <button className="summary-button progress-button" type="button" onClick={() => markParagraph(paragraphIndex)}>
-                读到这里
-              </button>
-              {showSummaries[paragraphIndex] && <div className="summary-text">{paragraph.summaryZh}</div>}
-            </article>
-          ))}
+                <p>
+                  {splitSentences(paragraph.text).map((sentence, sentenceIndex) => {
+                    const suspicious = suspiciousMatch(sentence, sourceMapItem)
+                    return (
+                      <span
+                        key={`${sentence}-${sentenceIndex}`}
+                        role="button"
+                        tabIndex={0}
+                        className={suspicious ? 'sentence suspicious' : 'sentence'}
+                        title={suspicious?.reason}
+                        onClick={() => setAid({ kind: 'sentence', sentence, summary: suspicious ? `${paragraph.summaryZh}\n\n疑点：${suspicious.reason}` : paragraph.summaryZh })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') setAid({ kind: 'sentence', sentence, summary: suspicious ? `${paragraph.summaryZh}\n\n疑点：${suspicious.reason}` : paragraph.summaryZh })
+                        }}
+                      >
+                        {renderWords(sentence, vocabularyMap, openWord)}
+                        {' '}
+                      </span>
+                    )
+                  })}
+                </p>
+                <button
+                  className="summary-button"
+                  type="button"
+                  onClick={() => setShowSummaries((value) => ({ ...value, [paragraphIndex]: !value[paragraphIndex] }))}
+                >
+                  {showSummaries[paragraphIndex] ? '隐藏段落摘要' : '段落摘要'}
+                </button>
+                <button className="summary-button progress-button" type="button" onClick={() => markParagraph(paragraphIndex)}>
+                  读到这里
+                </button>
+                {needsParagraphReview && (
+                  <button className="summary-button repair-button" type="button" onClick={() => repairQualityParagraphs([paragraphIndex + 1])} disabled={repairingParagraphs}>
+                    {repairingParagraphs ? '修复中' : '修复本段'}
+                  </button>
+                )}
+                {showSummaries[paragraphIndex] && <div className="summary-text">{paragraph.summaryZh}</div>}
+                {sourceMapItem && (
+                  <details className="paragraph-source-map" open={needsParagraphReview}>
+                    <summary>
+                      来源映射 · {sourceMapItem.status === 'review' ? '需复核' : '已匹配'}
+                      {sourceMapItem.confidence !== undefined ? ` · ${formatPercent(sourceMapItem.confidence || 0)}` : ''}
+                    </summary>
+                    {sourceMapItem.sourceRefs.length ? (
+                      sourceMapItem.sourceRefs.map((ref) => (
+                        <p key={ref.id}>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}：{ref.excerpt}</p>
+                      ))
+                    ) : (
+                      <p>{sourceMapItem.note || '未找到明显对应来源段落'}</p>
+                    )}
+                    {(sourceMapItem.suspiciousSentences || []).map((item, index) => (
+                      <p key={`${item.sentence}-${index}`} className="suspicious-note">可疑句子：{item.sentence}（{item.reason}）</p>
+                    ))}
+                  </details>
+                )}
+              </article>
+            )
+          })}
         </section>
 
         <section className="learning-block">
@@ -3064,10 +3259,16 @@ function ReportsView({
 function TasksView({ token, onChanged }: { token: string; onChanged: () => void }) {
   const [jobs, setJobs] = useState<GenerationJob[]>([])
   const [filter, setFilter] = useState('all')
+  const [typeFilter, setTypeFilter] = useState('all')
+  const [errorFilter, setErrorFilter] = useState('all')
   const [busyId, setBusyId] = useState('')
 
   async function loadJobs() {
-    const query = filter === 'all' ? '' : `?status=${filter}`
+    const params = new URLSearchParams()
+    if (filter !== 'all') params.set('status', filter)
+    if (typeFilter !== 'all') params.set('type', typeFilter)
+    if (errorFilter !== 'all') params.set('errorCode', errorFilter)
+    const query = params.toString() ? `?${params.toString()}` : ''
     const result = await requestJson<{ jobs: GenerationJob[] }>(`/api/jobs${query}`, token)
     setJobs(result.jobs)
   }
@@ -3076,7 +3277,7 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
     loadJobs().catch(() => undefined)
     const timer = window.setInterval(() => loadJobs().catch(() => undefined), 5000)
     return () => window.clearInterval(timer)
-  }, [filter, token])
+  }, [filter, typeFilter, errorFilter, token])
 
   async function act(job: GenerationJob, action: string) {
     setBusyId(job.id)
@@ -3107,6 +3308,31 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
             ['failed', '失败'],
           ].map(([value, label]) => (
             <button key={value} type="button" className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="segmented">
+          {[
+            ['all', '全部类型'],
+            ['generate-unit', '分级阅读'],
+            ['generate-podcast', '播客'],
+          ].map(([value, label]) => (
+            <button key={value} type="button" className={typeFilter === value ? 'active' : ''} onClick={() => setTypeFilter(value)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="segmented">
+          {[
+            ['all', '全部失败'],
+            ['provider-auth', '配置'],
+            ['rate-limit', '限流'],
+            ['upstream-temporary', '上游'],
+            ['quality-review', '质量'],
+            ['ocr-failed', 'OCR'],
+          ].map(([value, label]) => (
+            <button key={value} type="button" className={errorFilter === value ? 'active' : ''} onClick={() => setErrorFilter(value)}>
               {label}
             </button>
           ))}
@@ -3336,6 +3562,171 @@ function ServicesView({ token, onError }: { token: string; onError: (message: st
   )
 }
 
+function AdminView({ token, onNavigate, onError }: { token: string; onNavigate: (view: View) => void; onError: (message: string) => void }) {
+  const [status, setStatus] = useState<AdminStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  async function loadStatus() {
+    const result = await requestJson<AdminStatus>('/api/admin/status', token)
+    setStatus(result)
+  }
+
+  useEffect(() => {
+    setLoading(true)
+    loadStatus()
+      .catch((err) => onError(err instanceof Error ? err.message : '后台状态加载失败'))
+      .finally(() => setLoading(false))
+  }, [token])
+
+  const taskStatusItems = status ? Object.entries(status.tasks.byStatus) : []
+  const failedCodeItems = status ? Object.entries(status.tasks.failedByCode) : []
+
+  return (
+    <section className="page-section admin-section">
+      <div className="section-head">
+        <div>
+          <h1>管理后台</h1>
+          <p>{status ? `更新于 ${formatDateTime(status.updatedAt)}` : '任务、服务、备份和存储概览'}</p>
+        </div>
+        <button className="ghost-button" type="button" onClick={() => loadStatus().catch(() => undefined)} disabled={loading}>
+          {loading ? <Loader2 className="spin" size={18} /> : <RotateCcw size={18} />}
+          刷新
+        </button>
+      </div>
+
+      {loading && !status ? (
+        <div className="empty-state">
+          <Loader2 className="spin" size={32} />
+          <h2>正在读取后台状态</h2>
+          <p>正在汇总服务器运行数据。</p>
+        </div>
+      ) : status ? (
+        <>
+          <div className="admin-grid">
+            <article className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="eyebrow">Tasks</span>
+                  <h2>任务中心</h2>
+                </div>
+                <button type="button" onClick={() => onNavigate('tasks')}>打开任务</button>
+              </div>
+              <div className="stat-row compact">
+                <Stat label="总任务" value={String(status.tasks.total)} />
+                <Stat label="运行中" value={String(status.tasks.active)} />
+                <Stat label="失败" value={String(status.tasks.failed)} />
+              </div>
+              <div className="admin-chips">
+                {taskStatusItems.map(([key, value]) => <span key={key}>{jobStatusLabel(key)} {value}</span>)}
+                {failedCodeItems.map(([key, value]) => <span key={key}>{errorCodeLabel(key)} {value}</span>)}
+              </div>
+              <div className="admin-list">
+                {status.tasks.recent.slice(0, 4).map((job) => (
+                  <div key={job.id}>
+                    <strong>{job.unitTitle || job.podcastTitle || jobTypeLabel(job.type)}</strong>
+                    <span>{jobTypeLabel(job.type)} · {jobStatusLabel(job.status)} · {job.message || job.error || '无消息'}</span>
+                  </div>
+                ))}
+              </div>
+            </article>
+
+            <article className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="eyebrow">Backup</span>
+                  <h2>备份状态</h2>
+                </div>
+              </div>
+              <div className="deployment-grid admin-status-grid">
+                <StatusItem label="备份数量" ok={status.backup.backupCount > 0} value={`${status.backup.backupCount} 个`} />
+                <StatusItem
+                  label="最近备份"
+                  ok={Boolean(status.backup.latestBackup)}
+                  value={status.backup.latestBackup ? `${formatDateTime(status.backup.latestBackup.modifiedAt)} · ${formatBytes(status.backup.latestBackup.size)}` : '未检测到'}
+                />
+                <StatusItem
+                  label="恢复演练"
+                  ok={Boolean(status.backup.latestDrill?.ok)}
+                  value={status.backup.latestDrill ? (status.backup.latestDrill.ok ? `${status.backup.latestDrill.recordCount || 0} 条` : '最近失败') : '未执行'}
+                />
+              </div>
+            </article>
+
+            <article className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="eyebrow">AI Services</span>
+                  <h2>AI 服务状态</h2>
+                </div>
+                <button type="button" onClick={() => onNavigate('services')}>打开服务</button>
+              </div>
+              <div className="stat-row compact">
+                <Stat label="已配置" value={`${status.services.overview.configured}/${status.services.overview.total}`} />
+                <Stat label="健康/待测" value={String(status.services.overview.healthy)} />
+                <Stat label="冷却" value={String(status.services.overview.activeCooldowns)} />
+              </div>
+              <div className="admin-list">
+                {status.services.items.map((service) => (
+                  <div key={service.id}>
+                    <strong>{service.title}</strong>
+                    <span>{aiServiceStatusLabel(service.status)} · {service.endpointHost || '未配置'} · {service.model || '未配置模型'}</span>
+                  </div>
+                ))}
+              </div>
+            </article>
+
+            <article className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="eyebrow">Storage</span>
+                  <h2>存储占用</h2>
+                </div>
+                <strong>{formatBytes(status.storage.totalBytes)}</strong>
+              </div>
+              <div className="storage-list">
+                {status.storage.items.map((item) => (
+                  <div key={item.key}>
+                    <span>{item.label}</span>
+                    <strong>{formatBytes(item.bytes) || '0 KB'}</strong>
+                    <small>{item.files} 个文件{item.truncated ? '，已截断统计' : ''}</small>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </div>
+
+          <article className="admin-panel error-log-panel">
+            <div className="admin-panel-head">
+              <div>
+                <span className="eyebrow">Errors</span>
+                <h2>最近错误日志</h2>
+              </div>
+            </div>
+            {status.recentErrors.length ? (
+              <div className="error-log-list">
+                {status.recentErrors.map((item) => (
+                  <div key={item.id}>
+                    <span className={`status-pill ${item.level === 'error' ? 'failed' : 'queued'}`}>{item.scope}</span>
+                    <strong>{item.message}</strong>
+                    <p>{formatDateTime(item.createdAt)}{item.errorCode ? ` · ${errorCodeLabel(item.errorCode)}` : ''}{item.statusCode ? ` · ${item.statusCode}` : ''}</p>
+                    {item.detail && <p>{item.detail}</p>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state compact-empty">
+                <Check size={28} />
+                <h2>暂无错误</h2>
+                <p>任务失败或服务器异常会记录在这里。</p>
+              </div>
+            )}
+          </article>
+        </>
+      ) : null}
+    </section>
+  )
+}
+
 function jobStatusLabel(status: string) {
   const labels: Record<string, string> = {
     queued: '排队',
@@ -3354,6 +3745,21 @@ function jobTypeLabel(type: string) {
     'generate-podcast': '播客',
   }
   return labels[type] || type
+}
+
+function errorCodeLabel(code: string) {
+  const labels: Record<string, string> = {
+    'provider-auth': '配置问题',
+    'rate-limit': '限流/额度',
+    'upstream-temporary': '上游临时错误',
+    'ocr-failed': 'OCR 失败',
+    'quality-review': '质量复核',
+    'bad-request': '请求被拒绝',
+    'missing-resource': '资源缺失',
+    'server-error': '服务器错误',
+    unknown: '未知错误',
+  }
+  return labels[code] || code
 }
 
 function VocabularyView({

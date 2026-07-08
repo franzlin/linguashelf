@@ -166,6 +166,10 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 生成质量页会显示 AI/本地忠实度审稿、缺失关键词和逐段来源映射。强制重生成前会保存历史版本，学习页可以从“生成质量”里恢复旧版本。`QUALITY_AUDIT_MODE=off` 可关闭额外 AI 审稿调用。
 
+逐段来源映射会在每个阅读段落下显示对应的原书段落、匹配置信度和可疑句子。忠实度偏低时，可以只修复低质量段落；系统会保留整单元历史版本，并只替换被标记的阅读段落。
+
+管理后台集中显示任务统计、失败类型、备份状态、AI 服务状态、存储占用和最近错误日志。任务中心支持按任务类型和失败原因过滤。
+
 生成、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。
 
 ## 生词本
