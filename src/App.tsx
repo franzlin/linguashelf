@@ -1005,6 +1005,27 @@ export function App() {
     }
   }
 
+  async function deleteBook(book: Book) {
+    const confirmed = window.confirm(`确定删除《${book.title}》吗？\n\n会删除这本书的学习单元、进度、报告、任务和播客音频。生词本会保留。`)
+    if (!confirmed) return false
+    try {
+      await requestJson(`/api/books/${book.id}`, token, { method: 'DELETE' })
+      if (selectedBook?.id === book.id) {
+        setSelectedBook(null)
+        setBookUnits([])
+        setSelectedUnit(null)
+        setLatestReport(null)
+        setView('library')
+      }
+      await refresh(token)
+      setError('')
+      return true
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除书籍失败')
+      return false
+    }
+  }
+
   async function runGenerationJob(unit: Unit, body: Record<string, unknown>) {
     jobWatchAbortRef.current?.abort()
     const controller = new AbortController()
@@ -1149,6 +1170,7 @@ export function App() {
               openBook(book)
             }}
             onOpenBook={openBook}
+            onDeleteBook={deleteBook}
             onError={setError}
           />
         )}
@@ -1171,6 +1193,7 @@ export function App() {
             onRegenerateUnit={regenerateUnit}
             onPreGenerateBook={preGenerateBook}
             onRenameBook={renameBook}
+            onDeleteBook={deleteBook}
             onError={setError}
           />
         )}
@@ -1766,17 +1789,20 @@ function LibraryView({
   token,
   onUploaded,
   onOpenBook,
+  onDeleteBook,
   onError,
 }: {
   books: Book[]
   token: string
   onUploaded: (book: Book) => void
   onOpenBook: (book: Book) => void
+  onDeleteBook: (book: Book) => Promise<boolean>
   onError: (message: string) => void
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [deletingBookId, setDeletingBookId] = useState('')
 
   async function uploadFile(file: File) {
     const lowerName = file.name.toLowerCase()
@@ -1834,6 +1860,15 @@ function LibraryView({
     if (event.key !== 'Enter' && event.key !== ' ') return
     event.preventDefault()
     inputRef.current?.click()
+  }
+
+  async function deleteFromLibrary(book: Book) {
+    setDeletingBookId(book.id)
+    try {
+      await onDeleteBook(book)
+    } finally {
+      setDeletingBookId('')
+    }
   }
 
   return (
@@ -1909,9 +1944,15 @@ function LibraryView({
                 </div>
                 <div className="book-actions">
                   <span>{book.completedUnits}/{book.totalUnits} 完成</span>
-                  <button type="button" onClick={() => onOpenBook(book)}>
-                    打开
-                  </button>
+                  <div className="book-action-buttons">
+                    <button type="button" onClick={() => onOpenBook(book)}>
+                      打开
+                    </button>
+                    <button className="danger-button" type="button" onClick={() => deleteFromLibrary(book)} disabled={deletingBookId === book.id}>
+                      {deletingBookId === book.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                      删除
+                    </button>
+                  </div>
                 </div>
               </article>
             )
@@ -1980,6 +2021,7 @@ function BookView({
   onRegenerateUnit,
   onPreGenerateBook,
   onRenameBook,
+  onDeleteBook,
   onError,
 }: {
   book: Book
@@ -1991,12 +2033,14 @@ function BookView({
   onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) => Promise<Unit | null>
   onPreGenerateBook: (book: Book, options: { count: number; readingLevel?: string; listeningLevel?: string }) => Promise<number>
   onRenameBook: (book: Book, title: string) => Promise<Book | null>
+  onDeleteBook: (book: Book) => Promise<boolean>
   onError: (message: string) => void
 }) {
   const [regeneratingId, setRegeneratingId] = useState('')
   const [renamingBook, setRenamingBook] = useState(false)
   const [bookTitleDraft, setBookTitleDraft] = useState(book.title)
   const [savingBookTitle, setSavingBookTitle] = useState(false)
+  const [deletingBook, setDeletingBook] = useState(false)
   const [batching, setBatching] = useState(false)
   const [batchCount, setBatchCount] = useState(3)
   const [readingLevel, setReadingLevel] = useState(settings.readingLevel)
@@ -2063,6 +2107,15 @@ function BookView({
       if (renamed) setRenamingBook(false)
     } finally {
       setSavingBookTitle(false)
+    }
+  }
+
+  async function deleteCurrentBook() {
+    setDeletingBook(true)
+    try {
+      await onDeleteBook(book)
+    } finally {
+      setDeletingBook(false)
     }
   }
 
@@ -2396,6 +2449,10 @@ function BookView({
           )}
           <p>{book.author || book.filename}</p>
         </div>
+        <button className="ghost-button danger-button" type="button" onClick={deleteCurrentBook} disabled={deletingBook}>
+          {deletingBook ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}
+          删除书籍
+        </button>
       </div>
 
       <div className="stat-row">

@@ -2158,9 +2158,40 @@ async function deletePodcastAudioFiles(podcast) {
   const files = new Set([podcast?.audio?.file, `${podcast?.id}.wav`, `${podcast?.id}.mp3`].filter(Boolean))
   for (const file of files) {
     const audioPath = path.resolve(audioDir, file)
-    if (!audioPath.startsWith(path.resolve(audioDir))) continue
+    if (!isPathInside(audioPath, audioDir)) continue
     await fs.unlink(audioPath).catch(() => undefined)
   }
+}
+
+function isPathInside(targetPath, parentDir) {
+  const target = path.resolve(targetPath)
+  const parent = path.resolve(parentDir)
+  return target === parent || target.startsWith(`${parent}${path.sep}`)
+}
+
+async function deleteUnitAudioFiles(unit) {
+  const files = new Set()
+  if (unit?.audio?.hash && unit?.audio?.format) files.add(`${unit.id}-${unit.audio.hash}.${unit.audio.format}`)
+  try {
+    const entries = await fs.readdir(audioDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.startsWith(`${unit.id}-`)) files.add(entry.name)
+    }
+  } catch {
+    // Audio cache may not exist yet.
+  }
+  for (const file of files) {
+    const audioPath = path.resolve(audioDir, file)
+    if (!isPathInside(audioPath, audioDir)) continue
+    await fs.unlink(audioPath).catch(() => undefined)
+  }
+}
+
+async function deleteSourceFileIfSafe(sourcePath) {
+  if (!sourcePath) return
+  const resolved = path.resolve(sourcePath)
+  if (!isPathInside(resolved, uploadDir)) return
+  await fs.unlink(resolved).catch(() => undefined)
 }
 
 function estimateTtsInputTokens(text) {
@@ -5438,6 +5469,64 @@ async function createApp() {
     await writeDb(db)
     const units = db.units.filter((unit) => unit.bookId === book.id)
     res.json({ book: summarizeBook(book, units) })
+  })
+
+  app.delete('/api/books/:bookId', auth, async (req, res, next) => {
+    try {
+      const db = req.db
+      const book = db.books.find((item) => item.id === req.params.bookId && item.userId === req.user.id)
+      if (!book) {
+        res.status(404).json({ error: '未找到这本书' })
+        return
+      }
+
+      const units = db.units.filter((unit) => unit.bookId === book.id)
+      const unitIds = new Set(units.map((unit) => unit.id))
+      const podcasts = db.podcasts.filter((podcast) => podcast.bookId === book.id && podcast.userId === req.user.id)
+      const podcastIds = new Set(podcasts.map((podcast) => podcast.id))
+      const jobs = db.jobs.filter(
+        (job) =>
+          job.userId === req.user.id &&
+          (job.bookId === book.id || unitIds.has(job.unitId) || podcastIds.has(job.podcastId))
+      )
+      const runningJobs = jobs.filter((job) => job.status === 'running')
+      if (runningJobs.length) {
+        res.status(409).json({ error: '这本书还有正在运行的生成任务，请稍后再删除，或先到任务中心取消任务' })
+        return
+      }
+      const jobIds = new Set(jobs.map((job) => job.id))
+      const progressCount = db.progress.filter((item) => !item.userId || (item.userId === req.user.id && unitIds.has(item.unitId))).length
+      const reportCount = db.reports.filter((report) => report.bookId === book.id || unitIds.has(report.unitId)).length
+
+      await Promise.all([
+        ...podcasts.map((podcast) => deletePodcastAudioFiles(podcast)),
+        ...units.map((unit) => deleteUnitAudioFiles(unit)),
+        deleteSourceFileIfSafe(book.sourcePath),
+      ])
+
+      db.books = db.books.filter((item) => item.id !== book.id)
+      db.units = db.units.filter((unit) => unit.bookId !== book.id)
+      db.progress = db.progress.filter((item) => !unitIds.has(item.unitId))
+      db.reports = db.reports.filter((report) => report.bookId !== book.id && !unitIds.has(report.unitId))
+      db.jobs = db.jobs.filter((job) => !jobIds.has(job.id))
+      db.podcasts = db.podcasts.filter((podcast) => podcast.bookId !== book.id || podcast.userId !== req.user.id)
+      db.errorLogs = (db.errorLogs || []).filter((log) => !unitIds.has(log.unitId) && !podcastIds.has(log.podcastId) && !jobIds.has(log.jobId))
+
+      await writeDb(db)
+      res.json({
+        ok: true,
+        deleted: {
+          book: 1,
+          units: units.length,
+          reports: reportCount,
+          progress: progressCount,
+          jobs: jobs.length,
+          podcasts: podcasts.length,
+        },
+      })
+    } catch (error) {
+      next(error)
+    }
   })
 
   app.post('/api/books/:bookId/pre-generate', auth, async (req, res) => {

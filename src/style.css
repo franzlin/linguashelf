@@ -258,6 +258,14 @@ p {
   font-weight: 760;
 }
 
+.book-action-buttons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .upload-actions {
   display: grid;
   justify-items: end;
@@ -381,6 +389,12 @@ p {
 .unit-row > button {
   color: var(--green);
   background: var(--green-2);
+}
+
+.danger-button,
+.book-actions button.danger-button {
+  color: var(--danger);
+  background: var(--danger-2);
 }
 
 .unit-actions button,
