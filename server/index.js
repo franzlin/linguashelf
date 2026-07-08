@@ -439,7 +439,7 @@ function shouldRateLimitSpeech() {
 function shouldRateLimitPodcast() {
   return (
     (process.env.AI_PROVIDER || 'auto') !== 'mock' &&
-    Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_TTS_API_KEY)
+    Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY)
   )
 }
 
@@ -2150,6 +2150,13 @@ function shouldCooldownOfficialGeminiTts(message) {
   )
 }
 
+function geminiPrimaryTtsLabel(baseUrl) {
+  const value = String(baseUrl || '').toLowerCase()
+  if (value.includes('yunwu.ai')) return 'Yunwu Gemini 3.1'
+  if (value.includes('generativelanguage.googleapis.com')) return '官方 Gemini 3.1'
+  return 'Gemini 3.1 主来源'
+}
+
 function parseApiKeyList(...values) {
   const keys = values
     .flatMap((value) => String(value || '').split(/[,\s;]+/))
@@ -2163,13 +2170,15 @@ function apiKeyId(apiKey) {
 }
 
 function geminiTtsProviders() {
-  const officialKeys = parseApiKeyList(process.env.GEMINI_TTS_OFFICIAL_API_KEY, process.env.GOOGLE_API_KEY)
+  const officialKeys = parseApiKeyList(process.env.GEMINI_TTS_OFFICIAL_API_KEY)
   const fallbackKey = String(process.env.GEMINI_TTS_API_KEY || '').trim()
   const providers = []
+  const officialBaseUrl = process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com'
+  const primaryLabel = geminiPrimaryTtsLabel(officialBaseUrl)
   const officialProviders = officialKeys.map((apiKey, index) => ({
       name: 'official-gemini',
-      label: officialKeys.length > 1 ? `官方 Gemini 3.1 #${index + 1}` : '官方 Gemini 3.1',
-      baseUrl: process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com',
+      label: officialKeys.length > 1 ? `${primaryLabel} #${index + 1}` : primaryLabel,
+      baseUrl: officialBaseUrl,
       apiKey,
       keyId: apiKeyId(apiKey),
       model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
@@ -3973,8 +3982,8 @@ async function createApp() {
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         ttsConfigured: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
         ttsProvider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
-        podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_TTS_API_KEY),
-        podcastTtsPrimary: process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GOOGLE_API_KEY ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview' : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+        podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY),
+        podcastTtsPrimary: process.env.GEMINI_TTS_OFFICIAL_API_KEY ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview' : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
         podcastTtsInputTokenLimit: geminiTtsInputTokenLimit,
         podcastTtsOutputTokenLimit: geminiTtsOutputTokenLimit,
         podcastTtsChunkTokens,
