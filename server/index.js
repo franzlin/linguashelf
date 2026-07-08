@@ -106,6 +106,7 @@ const defaultDb = {
   podcasts: [],
   serviceChecks: [],
   errorLogs: [],
+  aiUsage: [],
 }
 
 let sqliteDb = null
@@ -649,6 +650,11 @@ function wordCount(text) {
   return (String(text || '').match(/[A-Za-z][A-Za-z'-]*/g) || []).length
 }
 
+function estimateTextTokens(text) {
+  const value = String(text || '')
+  return Math.max(1, Math.ceil(value.length / 4))
+}
+
 function takeWords(text, maxWords) {
   const words = String(text || '').split(/\s+/)
   return words.slice(0, maxWords).join(' ')
@@ -1035,7 +1041,17 @@ async function parsePdf(buffer, filename) {
     const result = await parser.getText()
     const pages = cleanPdfPages(result.pages || [])
     const usable = pages.filter((page) => page.wordCount >= 60)
-    const sourcePages = usable.length ? usable : await withOcrSlot(() => ocrPdfFallback(buffer, inferPdfPageCount(result)))
+    let sourcePages = usable
+    let ocr = null
+    if (!sourcePages.length) {
+      const ocrResult = await withOcrSlot(() => ocrPdfFallback(buffer, inferPdfPageCount(result)))
+      sourcePages = ocrResult.pages
+      ocr = {
+        provider: ocrResult.provider,
+        pages: sourcePages.length,
+        pagesAttempted: ocrResult.pagesAttempted,
+      }
+    }
 
     const chapters = groupPdfPages(sourcePages)
     if (!chapters.length) {
@@ -1046,6 +1062,7 @@ async function parsePdf(buffer, filename) {
       author: '',
       type: 'pdf',
       chapters,
+      ocr,
     }
   } finally {
     await parser.destroy()
@@ -1090,7 +1107,7 @@ async function ocrPdfFallback(buffer, pageCount) {
       const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= pdfOcrVisionMinWords)
       if (hasEnoughOcrText(cleaned)) {
         console.info(`PDF OCR completed with ${pdfOcrVisionModel}: ${cleaned.length}/${maxPages} pages`)
-        return cleaned
+        return { pages: cleaned, provider: pdfOcrVisionModel, pagesAttempted: maxPages }
       }
       const message = `${pdfOcrVisionModel} 识别正文不足`
       errors.push(message)
@@ -1109,7 +1126,7 @@ async function ocrPdfFallback(buffer, pageCount) {
     throw new Error(`OCR 没能识别出足够的英文正文，请确认 PDF 清晰、方向正确，且内容主要为英文${detail}`)
   }
   console.info(`PDF OCR completed with tesseract: ${cleaned.length}/${maxPages} pages`)
-  return cleaned
+  return { pages: cleaned, provider: 'tesseract-ocr', pagesAttempted: maxPages }
 }
 
 function hasEnoughOcrText(pages) {
@@ -3089,6 +3106,10 @@ function computeHome(db, userId) {
     .filter((job) => job.userId === userId && ['queued', 'running'].includes(job.status))
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     .slice(0, 8)
+  const failedJobs = db.jobs
+    .filter((job) => job.userId === userId && job.status === 'failed')
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+    .slice(0, 3)
 
   return {
     continueBook: continueBook ? summarizeBook(continueBook, userUnits.filter((unit) => unit.bookId === continueBook.id)) : null,
@@ -3096,6 +3117,7 @@ function computeHome(db, userId) {
     recentBooks: userBooks.slice(0, 3).map((book) => summarizeBook(book, userUnits.filter((unit) => unit.bookId === book.id))),
     latestReport: latestReport || null,
     activeJobs: activeJobs.map(publicJob),
+    failedJobs: failedJobs.map((job) => publicJobWithContext(job, db)),
   }
 }
 
@@ -3144,6 +3166,54 @@ function computeStats(db, userId) {
     ? levelIndex(listeningLevels, lastDifficulty.listeningLevel) - levelIndex(listeningLevels, previousDifficulty.listeningLevel)
     : 0
   const weeklyReadingMinutes = activity.slice(-7).reduce((total, item) => total + Number(item.minutes || 0), 0)
+  const todayCompleted = dailyMap.get(today)?.units || 0
+  const todayReadingMinutes = dailyMap.get(today)?.minutes || 0
+  const dailyGoalMinutes = Math.max(1, Math.round(Number(settings.studyMinutes || 10)))
+  const dailyGoalUnits = Math.max(1, Math.round(dailyGoalMinutes / 10))
+  const todayGoalMet = todayReadingMinutes >= dailyGoalMinutes || todayCompleted >= dailyGoalUnits
+  const dueTomorrow = vocabulary.filter((item) => {
+    const due = Date.parse(item.dueAt || '')
+    return Number.isFinite(due) && due > now && due <= now + 24 * 60 * 60 * 1000
+  }).length
+  const dueThisWeek = vocabulary.filter((item) => {
+    const due = Date.parse(item.dueAt || '')
+    return !item.dueAt || (Number.isFinite(due) && due <= now + 7 * 24 * 60 * 60 * 1000)
+  }).length
+  const weakVocabulary = vocabulary.filter((item) => Number(item.mastery || 0) <= 1).length
+  const learningVocabulary = vocabulary.filter((item) => Number(item.mastery || 0) < 4).length
+  const reviewPlan = {
+    dueToday: dueVocabulary,
+    dueTomorrow,
+    dueThisWeek,
+    mastered: masteredVocabulary,
+    learning: learningVocabulary,
+    weak: weakVocabulary,
+    message: dueVocabulary
+      ? `今天有 ${dueVocabulary} 个生词到期，先复习会让阅读更轻。`
+      : dueTomorrow
+        ? `明天有 ${dueTomorrow} 个生词到期，今天可以继续阅读。`
+        : '当前没有到期生词，可以把时间留给阅读。'
+  }
+  const recommendation = dueVocabulary
+    ? {
+        title: '先复习到期生词',
+        body: `有 ${dueVocabulary} 个词已经到复习时间，处理完再读新材料会更稳。`,
+        actionLabel: '去生词本',
+        view: 'vocabulary',
+      }
+    : todayGoalMet
+      ? {
+          title: '今天目标已完成',
+          body: '可以轻量听一集播客，或者留到明天继续。',
+          actionLabel: '查看数据',
+          view: 'dashboard',
+        }
+      : {
+          title: '继续下一篇阅读',
+          body: `今日目标 ${dailyGoalMinutes} 分钟，目前约 ${todayReadingMinutes} 分钟。`,
+          actionLabel: '回到首页',
+          view: 'home',
+        }
 
   let streakDays = 0
   for (let index = 0; index < 365; index += 1) {
@@ -3159,15 +3229,19 @@ function computeStats(db, userId) {
     dueVocabulary,
     masteredVocabulary,
     recentReports,
-    todayCompleted: dailyMap.get(today)?.units || 0,
-    dailyGoalUnits: Math.max(1, Math.round(Number(settings.studyMinutes || 10) / 10)),
+    todayCompleted,
+    dailyGoalUnits,
+    dailyGoalMinutes,
+    todayGoalMet,
     streakDays,
     calendar,
     readingMinutes,
-    todayReadingMinutes: dailyMap.get(today)?.minutes || 0,
+    todayReadingMinutes,
     weeklyReadingMinutes,
     activity,
     vocabularyGrowth,
+    reviewPlan,
+    recommendation,
     difficultyTrend,
     difficultySummary: {
       readingLevel: lastDifficulty?.readingLevel || settings.readingLevel,
@@ -4136,6 +4210,131 @@ function publicErrorLog(log) {
   }
 }
 
+function shouldRecordTextAiUsage() {
+  return (process.env.AI_PROVIDER || 'auto') !== 'mock' && Boolean(process.env.OPENAI_API_KEY)
+}
+
+function textAiUsageSource() {
+  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  return {
+    provider: serviceEndpointHost(baseUrl) || 'text-ai',
+    model: process.env.OPENAI_MODEL || 'gpt-5.5',
+  }
+}
+
+function recordAiUsage(db, entry = {}) {
+  if (!db || !entry.userId) return null
+  db.aiUsage = Array.isArray(db.aiUsage) ? db.aiUsage : []
+  const record = {
+    id: nanoid(),
+    userId: entry.userId,
+    category: String(entry.category || 'text').slice(0, 32),
+    action: String(entry.action || 'unknown').slice(0, 64),
+    provider: sanitizeServiceMessage(entry.provider || '').slice(0, 80),
+    model: sanitizeServiceMessage(entry.model || '').slice(0, 100),
+    inputTokens: Math.max(0, Math.round(Number(entry.inputTokens || 0))),
+    outputTokens: Math.max(0, Math.round(Number(entry.outputTokens || 0))),
+    audioSeconds: Math.max(0, Math.round(Number(entry.audioSeconds || 0))),
+    audioBytes: Math.max(0, Math.round(Number(entry.audioBytes || 0))),
+    pages: Math.max(0, Math.round(Number(entry.pages || 0))),
+    bytes: Math.max(0, Math.round(Number(entry.bytes || 0))),
+    chunks: Math.max(0, Math.round(Number(entry.chunks || 0))),
+    success: entry.success !== false,
+    statusCode: entry.statusCode || null,
+    errorCode: String(entry.errorCode || '').slice(0, 60),
+    message: sanitizeServiceMessage(entry.message || '').slice(0, 180),
+    createdAt: entry.createdAt || new Date().toISOString(),
+  }
+  db.aiUsage.push(record)
+  if (db.aiUsage.length > 3000) db.aiUsage = db.aiUsage.slice(-3000)
+  return record
+}
+
+async function persistAiUsage(entry = {}) {
+  const db = await readDb()
+  recordAiUsage(db, entry)
+  await writeDb(db)
+}
+
+function summarizeUsageRecords(records) {
+  return records.reduce(
+    (summary, item) => {
+      summary.calls += 1
+      if (item.success === false) summary.failed += 1
+      summary.inputTokens += Number(item.inputTokens || 0)
+      summary.outputTokens += Number(item.outputTokens || 0)
+      summary.audioSeconds += Number(item.audioSeconds || 0)
+      summary.audioBytes += Number(item.audioBytes || 0)
+      summary.pages += Number(item.pages || 0)
+      summary.bytes += Number(item.bytes || 0)
+      summary.chunks += Number(item.chunks || 0)
+      return summary
+    },
+    { calls: 0, failed: 0, inputTokens: 0, outputTokens: 0, audioSeconds: 0, audioBytes: 0, pages: 0, bytes: 0, chunks: 0 }
+  )
+}
+
+function groupUsage(records, keyFn) {
+  const map = new Map()
+  for (const item of records) {
+    const key = keyFn(item)
+    if (!key) continue
+    const current = map.get(key) || []
+    current.push(item)
+    map.set(key, current)
+  }
+  return [...map.entries()]
+    .map(([key, items]) => ({ key, ...summarizeUsageRecords(items) }))
+    .sort((a, b) => b.calls - a.calls)
+}
+
+function computeAiUsageSummary(db, userId) {
+  const now = Date.now()
+  const todayKey = new Date(now).toISOString().slice(0, 10)
+  const all = (db.aiUsage || [])
+    .filter((item) => item.userId === userId)
+    .filter((item) => Number.isFinite(Date.parse(item.createdAt || '')))
+  const todayRecords = all.filter((item) => String(item.createdAt || '').slice(0, 10) === todayKey)
+  const sevenDayRecords = all.filter((item) => Date.parse(item.createdAt) >= now - 7 * 24 * 60 * 60 * 1000)
+  const thirtyDayRecords = all.filter((item) => Date.parse(item.createdAt) >= now - 30 * 24 * 60 * 60 * 1000)
+  const byAction = groupUsage(thirtyDayRecords, (item) => item.action).slice(0, 10)
+  const byProviderModel = groupUsage(thirtyDayRecords, (item) => {
+    const provider = item.provider || 'unknown'
+    const model = item.model || 'unknown'
+    return `${provider} · ${model}`
+  }).slice(0, 8)
+  const recentFailures = all
+    .filter((item) => item.success === false)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, 8)
+    .map((item) => ({
+      action: item.action,
+      provider: item.provider,
+      model: item.model,
+      message: item.message,
+      errorCode: item.errorCode,
+      statusCode: item.statusCode,
+      createdAt: item.createdAt,
+    }))
+  const today = summarizeUsageRecords(todayRecords)
+  const sevenDays = summarizeUsageRecords(sevenDayRecords)
+  const thirtyDays = summarizeUsageRecords(thirtyDayRecords)
+  const warnings = []
+  if (sevenDays.failed >= 3) warnings.push({ level: 'warning', message: `近 7 天 AI/OCR/TTS 失败 ${sevenDays.failed} 次`, detail: '建议打开服务状态页测试对应来源。' })
+  if (today.calls >= 30) warnings.push({ level: 'warning', message: `今天 AI 调用 ${today.calls} 次`, detail: '如果不是主动批量生成，请检查任务中心。' })
+  if (today.audioSeconds >= 60 * 45) warnings.push({ level: 'warning', message: `今天 TTS 音频约 ${Math.round(today.audioSeconds / 60)} 分钟`, detail: '播客 TTS 成本通常高于普通文本生成。' })
+
+  return {
+    today,
+    sevenDays,
+    thirtyDays,
+    byAction,
+    byProviderModel,
+    recentFailures,
+    warnings,
+  }
+}
+
 async function computeBackupStatus() {
   try {
     const entries = await fs.readdir(backupDir, { withFileTypes: true })
@@ -4276,9 +4475,40 @@ function taskSummary(db, userId) {
   }
 }
 
+function buildAdminWarnings(backup, storage, tasks, aiUsage) {
+  const warnings = []
+  const now = Date.now()
+  const latestBackupAt = backup.latestBackup ? Date.parse(backup.latestBackup.modifiedAt) : 0
+  if (!backup.latestBackup) {
+    warnings.push({ level: 'critical', scope: 'backup', message: '没有检测到可用备份', detail: '请检查每日备份任务是否正常运行。' })
+  } else if (Number.isFinite(latestBackupAt) && now - latestBackupAt > 36 * 60 * 60 * 1000) {
+    warnings.push({ level: 'warning', scope: 'backup', message: '最近备份超过 36 小时', detail: `最近一次：${backup.latestBackup.modifiedAt}` })
+  }
+  if (backup.latestBackup && !String(backup.latestBackup.name || '').endsWith('.enc')) {
+    warnings.push({ level: 'warning', scope: 'backup', message: '最近备份不是加密文件', detail: '建议确认 BACKUP_ENCRYPTION_REQUIRED=true。' })
+  }
+  if (!backup.latestDrill) {
+    warnings.push({ level: 'warning', scope: 'backup', message: '还没有恢复演练报告', detail: '备份必须能恢复才算真正可用。' })
+  } else if (!backup.latestDrill.ok) {
+    warnings.push({ level: 'critical', scope: 'backup', message: '最近恢复演练失败', detail: '请优先检查备份脚本和加密密钥。' })
+  }
+  if (Number(storage.totalBytes || 0) > 20 * 1024 * 1024 * 1024) {
+    warnings.push({ level: 'warning', scope: 'storage', message: '数据目录超过 20GB', detail: '需要清理旧音频或扩容磁盘。' })
+  }
+  if (Number(tasks.failed || 0) > 0) {
+    warnings.push({ level: 'warning', scope: 'tasks', message: `有 ${tasks.failed} 个失败任务`, detail: '打开任务中心查看失败原因并按需重试。' })
+  }
+  for (const warning of aiUsage.warnings || []) {
+    warnings.push({ level: warning.level || 'warning', scope: 'ai', message: warning.message, detail: warning.detail || '' })
+  }
+  return warnings
+}
+
 async function buildAdminStatusPayload(db, userId) {
   const [backup, storage] = await Promise.all([computeBackupStatus(), computeStorageUsage()])
   const services = buildAiServicesPayload(db, userId)
+  const tasks = taskSummary(db, userId)
+  const aiUsage = computeAiUsageSummary(db, userId)
   const recentErrors = (db.errorLogs || [])
     .filter((log) => !log.userId || log.userId === userId)
     .slice()
@@ -4287,7 +4517,9 @@ async function buildAdminStatusPayload(db, userId) {
     .map(publicErrorLog)
   return {
     updatedAt: new Date().toISOString(),
-    tasks: taskSummary(db, userId),
+    warnings: buildAdminWarnings(backup, storage, tasks, aiUsage),
+    tasks,
+    aiUsage,
     backup,
     services: {
       overview: services.overview,
@@ -4531,6 +4763,19 @@ async function processPodcastJob(jobId) {
   try {
     scriptResult = await generatePodcastScript(podcast.sourceText, podcast.lexile || podcastLexileDefault, podcast.index || 1, normalizePodcastKind(podcast.kind))
   } catch (error) {
+    if (shouldRecordTextAiUsage()) {
+      const source = textAiUsageSource()
+      await persistAiUsage({
+        userId: job.userId,
+        category: 'text',
+        action: 'generate-podcast-script',
+        ...source,
+        inputTokens: estimateTextTokens(podcast.sourceText),
+        success: false,
+        statusCode: parseStatusCode(error.message),
+        message: error.message || '播客脚本生成失败',
+      }).catch((usageError) => console.error('failed to record ai usage', usageError))
+    }
     await failPodcastJob(job.id, error.message || '播客脚本生成失败', { stage: 'podcast-script' })
     return
   }
@@ -4553,6 +4798,19 @@ async function processPodcastJob(jobId) {
   job.progress = 35
   job.message = '正在合成播客音频'
   job.updatedAt = podcast.updatedAt
+  if (shouldRecordTextAiUsage()) {
+    const source = textAiUsageSource()
+    recordAiUsage(db, {
+      userId: job.userId,
+      category: 'text',
+      action: 'generate-podcast-script',
+      ...source,
+      inputTokens: estimateTextTokens(podcast.sourceText),
+      outputTokens: estimateTextTokens(podcast.scriptText),
+      success: String(scriptResult.mode || '').includes('ai'),
+      message: String(scriptResult.mode || '').includes('ai') ? '' : '使用本地播客脚本兜底',
+    })
+  }
   await writeDb(db)
 
   let audio = null
@@ -4562,6 +4820,18 @@ async function processPodcastJob(jobId) {
       await updatePodcastJobProgress(podcast.id, job.id, progress, `正在合成音频 ${done}/${total}`)
     })
   } catch (error) {
+    await persistAiUsage({
+      userId: job.userId,
+      category: 'audio',
+      action: 'generate-podcast-tts',
+      provider: 'Gemini TTS',
+      model: process.env.GEMINI_TTS_OFFICIAL_MODEL || process.env.GEMINI_TTS_MODEL || 'gemini-tts',
+      inputTokens: estimateTtsInputTokens(podcast.scriptText || ''),
+      chunks: chunkTextForTts(podcast.scriptText || '').length,
+      success: false,
+      statusCode: parseStatusCode(error.message),
+      message: error.message || '播客音频合成失败',
+    }).catch((usageError) => console.error('failed to record ai usage', usageError))
     await failPodcastJob(job.id, error.message || '播客音频合成失败', { stage: 'podcast-audio' })
     return
   }
@@ -4572,6 +4842,18 @@ async function processPodcastJob(jobId) {
   if (!job || !podcast) return
 
   podcast.audio = audio
+  recordAiUsage(db, {
+    userId: job.userId,
+    category: 'audio',
+    action: 'generate-podcast-tts',
+    provider: audio.provider || 'Gemini TTS',
+    model: audio.model || '',
+    inputTokens: estimateTtsInputTokens(podcast.scriptText || ''),
+    audioSeconds: audio.durationSeconds,
+    audioBytes: audio.byteLength,
+    chunks: audio.chunkCount,
+    success: true,
+  })
   podcast.status = 'ready'
   podcast.updatedAt = new Date().toISOString()
   job.status = 'succeeded'
@@ -4662,6 +4944,19 @@ async function processJobQueue() {
       }
 
       if (failure || !content) {
+        if (shouldRecordTextAiUsage()) {
+          const source = textAiUsageSource()
+          recordAiUsage(db, {
+            userId: job.userId,
+            category: 'text',
+            action: 'generate-unit',
+            ...source,
+            inputTokens: estimateTextTokens(unit.sourceText),
+            success: false,
+            statusCode: parseStatusCode(failure),
+            message: failure || 'AI 未返回学习单元',
+          })
+        }
         markJobFailed(job, failure || 'AI 未返回学习单元', { stage: 'unit-generation' })
         appendErrorLog(db, {
           scope: 'job',
@@ -4684,6 +4979,21 @@ async function processJobQueue() {
         }
         await writeDb(db)
         continue
+      }
+
+      if (shouldRecordTextAiUsage()) {
+        const source = textAiUsageSource()
+        const usedAi = content.generationMode !== 'local-demo'
+        recordAiUsage(db, {
+          userId: job.userId,
+          category: 'text',
+          action: 'generate-unit',
+          ...source,
+          inputTokens: estimateTextTokens(unit.sourceText),
+          outputTokens: estimateTextTokens(JSON.stringify(content)),
+          success: usedAi,
+          message: usedAi ? '' : 'AI 调用失败，学习单元使用本地兜底',
+        })
       }
 
       const quality = assessContentQuality(content, unit)
@@ -5064,6 +5374,18 @@ async function createApp() {
       const units = planUnits(bookId, parsed.chapters, parsed.type)
       db.books.push(book)
       db.units.push(...units)
+      if (parsed.ocr) {
+        recordAiUsage(db, {
+          userId: req.user.id,
+          category: 'ocr',
+          action: 'pdf-ocr',
+          provider: parsed.ocr.provider,
+          model: parsed.ocr.provider,
+          pages: parsed.ocr.pagesAttempted || parsed.ocr.pages,
+          bytes: req.file.size,
+          success: true,
+        })
+      }
       await writeDb(db)
 
       res.json({ book: summarizeBook(book, units), units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
@@ -5616,7 +5938,32 @@ async function createApp() {
         let detail
         try {
           detail = await generateWordDefinition(term, sentence)
-        } catch {
+          if (shouldRecordTextAiUsage()) {
+            const source = textAiUsageSource()
+            recordAiUsage(db, {
+              userId: req.user.id,
+              category: 'text',
+              action: 'define-word',
+              ...source,
+              inputTokens: estimateTextTokens(`${term}\n${sentence}`),
+              outputTokens: estimateTextTokens(JSON.stringify(detail)),
+              success: true,
+            })
+          }
+        } catch (error) {
+          if (shouldRecordTextAiUsage()) {
+            const source = textAiUsageSource()
+            recordAiUsage(db, {
+              userId: req.user.id,
+              category: 'text',
+              action: 'define-word',
+              ...source,
+              inputTokens: estimateTextTokens(`${term}\n${sentence}`),
+              success: false,
+              statusCode: parseStatusCode(error.message),
+              message: error.message || '单词释义失败，使用本地兜底',
+            })
+          }
           detail = fallbackDefinition(term)
         }
 
@@ -5829,8 +6176,41 @@ async function createApp() {
       }
 
       const audioRequest = buildSpeechAudioRequest(unit)
-      if (!(await hasCachedSpeechAudio(audioRequest)) && shouldRateLimitSpeech() && !consumeUserQuota(req, res, 'speech-audio')) return
-      const audio = await generateSpeechAudio(unit, audioRequest)
+      const cachedAudio = await hasCachedSpeechAudio(audioRequest)
+      if (!cachedAudio && shouldRateLimitSpeech() && !consumeUserQuota(req, res, 'speech-audio')) return
+      let audio
+      try {
+        audio = await generateSpeechAudio(unit, audioRequest)
+      } catch (error) {
+        if (!cachedAudio) {
+          recordAiUsage(db, {
+            userId: req.user.id,
+            category: 'audio',
+            action: 'speech-audio',
+            provider: audioRequest.ttsProvider,
+            model: audioRequest.model,
+            inputTokens: estimateTextTokens(audioRequest.input),
+            success: false,
+            statusCode: parseStatusCode(error.message),
+            message: error.message || '听力音频生成失败',
+          })
+          await writeDb(db).catch((usageError) => console.error('failed to record ai usage', usageError))
+        }
+        throw error
+      }
+      if (!cachedAudio) {
+        const stat = await fs.stat(audio.audioPath).catch(() => null)
+        recordAiUsage(db, {
+          userId: req.user.id,
+          category: 'audio',
+          action: 'speech-audio',
+          provider: audio.ttsProvider,
+          model: audio.model,
+          inputTokens: estimateTextTokens(audio.input),
+          audioBytes: stat?.size || 0,
+          success: true,
+        })
+      }
       unit.audio = {
         model: audio.model,
         voice: audio.voice,

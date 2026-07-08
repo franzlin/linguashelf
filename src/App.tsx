@@ -339,6 +339,7 @@ type AppData = {
     recentBooks: Book[]
     latestReport: Report | null
     activeJobs: GenerationJob[]
+    failedJobs: GenerationJob[]
   }
   books: Book[]
   vocabulary: VocabularyItem[]
@@ -359,6 +360,8 @@ type AppData = {
     }>
     todayCompleted: number
     dailyGoalUnits: number
+    dailyGoalMinutes: number
+    todayGoalMet: boolean
     streakDays: number
     calendar: Array<{
       date: string
@@ -384,6 +387,21 @@ type AppData = {
         added: number
         total: number
       }>
+    }
+    reviewPlan: {
+      dueToday: number
+      dueTomorrow: number
+      dueThisWeek: number
+      mastered: number
+      learning: number
+      weak: number
+      message: string
+    }
+    recommendation: {
+      title: string
+      body: string
+      actionLabel: string
+      view: View
     }
     difficultyTrend: Array<{
       date: string
@@ -511,6 +529,12 @@ type AiServicesPayload = {
 
 type AdminStatus = {
   updatedAt: string
+  warnings: Array<{
+    level: 'warning' | 'critical' | string
+    scope: string
+    message: string
+    detail?: string
+  }>
   tasks: {
     total: number
     active: number
@@ -533,6 +557,27 @@ type AdminStatus = {
       endpointHost: string
       warning?: string
       lastCheck?: AiServiceCheck | null
+    }>
+  }
+  aiUsage: {
+    today: UsageSummary
+    sevenDays: UsageSummary
+    thirtyDays: UsageSummary
+    byAction: Array<UsageSummary & { key: string }>
+    byProviderModel: Array<UsageSummary & { key: string }>
+    recentFailures: Array<{
+      action: string
+      provider: string
+      model: string
+      message: string
+      errorCode?: string
+      statusCode?: number | null
+      createdAt: string
+    }>
+    warnings: Array<{
+      level: string
+      message: string
+      detail?: string
     }>
   }
   storage: {
@@ -560,6 +605,18 @@ type AdminStatus = {
     errorCode?: string
     createdAt: string
   }>
+}
+
+type UsageSummary = {
+  calls: number
+  failed: number
+  inputTokens: number
+  outputTokens: number
+  audioSeconds: number
+  audioBytes: number
+  pages: number
+  bytes: number
+  chunks: number
 }
 
 type SelectedAid =
@@ -673,6 +730,25 @@ function formatBytes(bytes?: number) {
   if (!value) return ''
   if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatTokenCount(tokens?: number) {
+  const value = Number(tokens || 0)
+  if (!value) return '0'
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
+  return String(Math.round(value))
+}
+
+function aiUsageActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    'generate-unit': '分级单元',
+    'define-word': '单词释义',
+    'speech-audio': '听力音频',
+    'generate-podcast-script': '播客脚本',
+    'generate-podcast-tts': '播客 TTS',
+    'pdf-ocr': 'PDF OCR',
+  }
+  return labels[action] || action
 }
 
 function formatDateTime(value?: string | null) {
@@ -1239,6 +1315,9 @@ function HomeView({
 }) {
   const continueUnit = data.home.continueUnit
   const continueBook = data.home.continueBook
+  const recommendation = data.stats.recommendation
+  const reviewPlan = data.stats.reviewPlan
+  const failedJobs = data.home.failedJobs || []
 
   return (
     <section className="home-grid">
@@ -1274,6 +1353,29 @@ function HomeView({
           <Stat label="平均正确率" value={formatPercent(data.stats.averageCorrectRate)} />
           <Stat label="到期生词" value={String(data.stats.dueVocabulary)} />
           <Stat label="连续学习" value={`${data.stats.streakDays || 0} 天`} />
+        </div>
+
+        <div className="insight-grid">
+          <article className="insight-card">
+            <div>
+              <span className="eyebrow">今日推荐</span>
+              <h2>{recommendation?.title || '继续学习'}</h2>
+              <p>{recommendation?.body || '根据你的学习进度选择下一步。'}</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => onNavigate(recommendation?.view || 'home')}>
+              {recommendation?.actionLabel || '开始'}
+            </button>
+          </article>
+          <article className="insight-card">
+            <div>
+              <span className="eyebrow">复习计划</span>
+              <h2>{reviewPlan?.message || '暂无复习压力'}</h2>
+              <p>今日 {reviewPlan?.dueToday || 0} · 明日 {reviewPlan?.dueTomorrow || 0} · 本周 {reviewPlan?.dueThisWeek || 0}</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => onNavigate('vocabulary')}>
+              生词本
+            </button>
+          </article>
         </div>
 
         <section className="page-section compact-section">
@@ -1327,6 +1429,15 @@ function HomeView({
               ))}
             </div>
           )}
+          {failedJobs.length > 0 && (
+            <div className="task-diagnosis muted">
+              <strong>最近有 {failedJobs.length} 个失败任务</strong>
+              <p>可以进入任务中心查看原因、重试或取消。</p>
+              <button className="ghost-button" type="button" onClick={() => onNavigate('tasks')}>
+                打开任务
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="page-section compact-section">
@@ -1356,6 +1467,7 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
   const difficultyTrend = stats.difficultyTrend || []
   const maxActivityMinutes = Math.max(1, ...activity.map((item) => Number(item.minutes || 0)))
   const maxVocabularyAdded = Math.max(1, ...vocabularyDaily.map((item) => Number(item.added || 0)))
+  const goalPercent = Math.min(100, Math.round(((stats.todayReadingMinutes || 0) / Math.max(1, stats.dailyGoalMinutes || 10)) * 100))
 
   return (
     <section className="dashboard-page">
@@ -1372,13 +1484,48 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
       </div>
 
       <div className="stat-row dashboard-kpis">
-        <MetricCard icon={Flame} label="连续学习" value={`${stats.streakDays || 0} 天`} detail={`今日 ${stats.todayCompleted || 0}/${stats.dailyGoalUnits || 1} 单元`} />
+        <MetricCard icon={Flame} label="连续学习" value={`${stats.streakDays || 0} 天`} detail={stats.todayGoalMet ? '今日目标已完成' : `今日 ${stats.todayCompleted || 0}/${stats.dailyGoalUnits || 1} 单元`} />
         <MetricCard icon={Clock} label="阅读分钟数" value={`${formatNumber(stats.readingMinutes || 0)} 分钟`} detail={`近 7 天 ${formatNumber(stats.weeklyReadingMinutes || 0)} 分钟`} />
         <MetricCard icon={Check} label="完成单元" value={String(stats.completedUnits || 0)} detail={`平均正确率 ${formatPercent(stats.averageCorrectRate || 0)}`} />
         <MetricCard icon={BookMarked} label="生词增长" value={`${stats.vocabularyGrowth?.total || stats.vocabularyCount || 0} 个`} detail={`本周 +${stats.vocabularyGrowth?.addedThisWeek || 0}`} />
       </div>
 
       <div className="dashboard-grid">
+        <article className="page-section dashboard-panel">
+          <div className="section-head">
+            <div>
+              <h2>今日目标</h2>
+              <p>{stats.recommendation?.body || '保持稳定节奏，不靠突击。'}</p>
+            </div>
+            <strong>{goalPercent}%</strong>
+          </div>
+          <div className="goal-progress" aria-label="今日目标进度">
+            <span style={{ width: `${goalPercent}%` }} />
+          </div>
+          <div className="dashboard-note">
+            <Clock size={16} />
+            今日 {formatNumber(stats.todayReadingMinutes || 0)} / {formatNumber(stats.dailyGoalMinutes || 10)} 分钟
+          </div>
+        </article>
+
+        <article className="page-section dashboard-panel">
+          <div className="section-head">
+            <div>
+              <h2>复习计划</h2>
+              <p>{stats.reviewPlan?.message || '当前没有到期生词。'}</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => onNavigate('vocabulary')}>
+              生词本
+            </button>
+          </div>
+          <div className="review-plan-grid">
+            <Stat label="今日到期" value={String(stats.reviewPlan?.dueToday || 0)} />
+            <Stat label="明日到期" value={String(stats.reviewPlan?.dueTomorrow || 0)} />
+            <Stat label="薄弱词" value={String(stats.reviewPlan?.weak || 0)} />
+            <Stat label="已掌握" value={String(stats.reviewPlan?.mastered || 0)} />
+          </div>
+        </article>
+
         <article className="page-section dashboard-panel">
           <div className="section-head">
             <div>
@@ -1815,6 +1962,14 @@ function podcastStatusClass(podcast: Podcast) {
   return 'planned'
 }
 
+function podcastProgressPercent(podcast: Podcast) {
+  if (podcast.progress?.completed) return 100
+  const duration = Number(podcast.audio?.durationSeconds || 0)
+  const position = Number(podcast.progress?.positionSeconds || 0)
+  if (!duration || !position) return 0
+  return Math.max(0, Math.min(100, Math.round((position / duration) * 100)))
+}
+
 function BookView({
   book,
   units,
@@ -2182,6 +2337,14 @@ function BookView({
   const nextPodcastDisabled = podcastBusy || visiblePodcastHasActiveJob || (selectedPodcastKind === 'topic' && visiblePodcasts.length > 0)
   const generateAllButtonLabel = visiblePodcasts.length ? '生成剩余全部' : '生成全部'
   const generateAllDisabled = podcastBusy || visiblePodcastHasActiveJob || (selectedPodcastKind === 'topic' && visiblePodcasts.length > 0)
+  const estimatedPodcastTotal = selectedPodcastKind === 'topic' ? 1 : Math.max(1, Math.ceil((book.wordCount || 0) / 2200))
+  const estimatedPodcastRemaining = Math.max(0, estimatedPodcastTotal - visiblePodcasts.length)
+  const nextPodcastEstimate = selectedPodcastKind === 'topic'
+    ? '预计 1 集，约 1-3 分钟脚本与 TTS。'
+    : '按顺序生成 1 集，通常约 1-3 分钟。'
+  const allPodcastEstimate = selectedPodcastKind === 'topic'
+    ? '全书专题只保留 1 集。'
+    : `预计还剩约 ${estimatedPodcastRemaining || estimatedPodcastTotal} 集，会按队列逐集生成。`
 
   return (
     <section className="page-section">
@@ -2305,6 +2468,10 @@ function BookView({
             </button>
           )}
         </div>
+        <div className="podcast-generate-hints">
+          <span>{nextPodcastEstimate}</span>
+          <span>{allPodcastEstimate}</span>
+        </div>
         {visiblePodcasts.length > 0 ? (
           <div className="podcast-list">
             {visiblePodcasts.map((podcast) => {
@@ -2317,6 +2484,8 @@ function BookView({
                   : busy
                     ? 'TTS 合成中'
                     : 'TTS 待生成'
+              const heardPercent = podcastProgressPercent(podcast)
+              const remainingSeconds = Math.max(0, Number(podcast.audio?.durationSeconds || 0) - Number(podcast.progress?.positionSeconds || 0))
               return (
                 <article key={podcast.id} className="podcast-row">
                   <div className="unit-index">{String(podcast.index).padStart(2, '0')}</div>
@@ -2339,7 +2508,7 @@ function BookView({
                       </span>
                       {podcast.audio?.model && <span>模型 {podcast.audio.model}</span>}
                       {podcast.audio?.promptProfile && <span>朗读策略 {podcastPromptProfileLabel(podcast.audio.promptProfile)}</span>}
-                      {podcast.progress?.positionSeconds ? <span>已听 {formatDuration(podcast.progress.positionSeconds)}</span> : null}
+                      {heardPercent > 0 ? <span>已听 {heardPercent}% · 剩余 {formatDuration(remainingSeconds)}</span> : null}
                     </div>
                     {busy && <div className="progress-line task-progress"><span style={{ width: `${progress}%` }} /></div>}
                     {podcast.error && <p className="podcast-error">{podcast.error}</p>}
@@ -3628,6 +3797,7 @@ function AdminView({ token, onNavigate, onError }: { token: string; onNavigate: 
 
   const taskStatusItems = status ? Object.entries(status.tasks.byStatus) : []
   const failedCodeItems = status ? Object.entries(status.tasks.failedByCode) : []
+  const adminWarnings = status?.warnings || []
 
   return (
     <section className="page-section admin-section">
@@ -3650,6 +3820,17 @@ function AdminView({ token, onNavigate, onError }: { token: string; onNavigate: 
         </div>
       ) : status ? (
         <>
+          {adminWarnings.length > 0 && (
+            <div className="admin-warning-list">
+              {adminWarnings.map((warning, index) => (
+                <div key={`${warning.scope}-${index}`} className={warning.level === 'critical' ? 'critical' : ''}>
+                  <strong>{warning.message}</strong>
+                  {warning.detail && <span>{warning.detail}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="admin-grid">
             <article className="admin-panel">
               <div className="admin-panel-head">
@@ -3718,6 +3899,46 @@ function AdminView({ token, onNavigate, onError }: { token: string; onNavigate: 
                   <div key={service.id}>
                     <strong>{service.title}</strong>
                     <span>{aiServiceStatusLabel(service.status)} · {service.endpointHost || '未配置'} · {service.model || '未配置模型'}</span>
+                  </div>
+                ))}
+              </div>
+            </article>
+
+            <article className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="eyebrow">AI Usage</span>
+                  <h2>AI 用量估算</h2>
+                </div>
+              </div>
+              <div className="stat-row compact">
+                <Stat label="今日调用" value={String(status.aiUsage.today.calls)} />
+                <Stat label="今日失败" value={String(status.aiUsage.today.failed)} />
+                <Stat label="7 天调用" value={String(status.aiUsage.sevenDays.calls)} />
+              </div>
+              <div className="usage-grid">
+                <div>
+                  <span>30 天输入</span>
+                  <strong>{formatTokenCount(status.aiUsage.thirtyDays.inputTokens)} tokens</strong>
+                </div>
+                <div>
+                  <span>30 天输出</span>
+                  <strong>{formatTokenCount(status.aiUsage.thirtyDays.outputTokens)} tokens</strong>
+                </div>
+                <div>
+                  <span>TTS 音频</span>
+                  <strong>{formatDuration(status.aiUsage.thirtyDays.audioSeconds)}</strong>
+                </div>
+                <div>
+                  <span>OCR 页数</span>
+                  <strong>{formatNumber(status.aiUsage.thirtyDays.pages)}</strong>
+                </div>
+              </div>
+              <div className="admin-list compact-list">
+                {status.aiUsage.byAction.slice(0, 4).map((item) => (
+                  <div key={item.key}>
+                    <strong>{aiUsageActionLabel(item.key)}</strong>
+                    <span>{item.calls} 次 · 失败 {item.failed} · {formatTokenCount(item.inputTokens + item.outputTokens)} tokens</span>
                   </div>
                 ))}
               </div>

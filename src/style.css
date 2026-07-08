@@ -511,6 +511,33 @@ p {
   gap: 14px;
 }
 
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.insight-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  display: grid;
+  gap: 14px;
+  align-content: space-between;
+}
+
+.insight-card h2 {
+  margin-top: 6px;
+  font-size: 1.05rem;
+}
+
+.insight-card p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
 .continue-panel {
   min-height: 220px;
   padding: 24px;
@@ -888,6 +915,26 @@ p {
   font-weight: 760;
 }
 
+.goal-progress {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.goal-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+
+.review-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .difficulty-trend {
   min-height: 210px;
   display: grid;
@@ -1053,6 +1100,24 @@ p {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.podcast-generate-hints {
+  margin: 10px 0 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.podcast-generate-hints span {
+  width: max-content;
+  max-width: 100%;
+  padding: 5px 9px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 0.84rem;
+  font-weight: 680;
 }
 
 .tts-source-chip {
@@ -1920,6 +1985,32 @@ p {
   gap: 12px;
 }
 
+.admin-warning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-warning-list div {
+  padding: 12px 14px;
+  border: 1px solid var(--rust-2);
+  border-radius: 8px;
+  color: var(--rust);
+  background: #fff9ef;
+  display: grid;
+  gap: 4px;
+}
+
+.admin-warning-list div.critical {
+  border-color: var(--danger-2);
+  color: var(--danger);
+  background: #fff7f4;
+}
+
+.admin-warning-list span {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
 .admin-panel {
   padding: 16px;
   border: 1px solid var(--line);
@@ -1953,6 +2044,7 @@ p {
 
 .admin-chips,
 .admin-list,
+.usage-grid,
 .storage-list,
 .error-log-list {
   display: grid;
@@ -1972,6 +2064,7 @@ p {
 }
 
 .admin-list div,
+.usage-grid div,
 .storage-list div,
 .error-log-list div {
   display: grid;
@@ -1982,11 +2075,20 @@ p {
 }
 
 .admin-list span,
+.usage-grid span,
 .storage-list small,
 .error-log-list p {
   color: var(--muted);
   font-size: 0.88rem;
   line-height: 1.5;
+}
+
+.usage-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.usage-grid strong {
+  font-size: 1rem;
 }
 
 .admin-status-grid {
@@ -2207,6 +2309,10 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .insight-grid {
+    grid-template-columns: 1fr;
+  }
+
   .dashboard-hero {
     align-items: stretch;
     flex-direction: column;
@@ -2270,6 +2376,7 @@ p {
   .deployment-grid,
   .service-grid,
   .service-facts,
+  .usage-grid,
   .admin-grid {
     grid-template-columns: 1fr;
     min-width: 0;
