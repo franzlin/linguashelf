@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "start": "node server/index.js --prod",
     "check": "tsc --noEmit",
+    "e2e": "npm run build && node scripts/e2e.mjs",
     "smoke": "node scripts/smoke.mjs",
     "predeploy": "node scripts/predeploy-check.mjs",
     "backup": "node scripts/backup.mjs",

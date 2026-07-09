@@ -249,6 +249,21 @@ type GenerationJob = {
   statusCode?: number | null
   retryCount?: number
   qualityStatus?: string
+  autoRetryAt?: string
+  autoRetryDelaySeconds?: number
+  autoRetryReason?: string
+  lastError?: string
+  lastErrorCode?: string
+  lastErrorStage?: string
+  canRetryNow?: boolean
+  nextActionKind?: string
+  nextActionLabel?: string
+  nextActionDetail?: string
+  usageSummary?: {
+    label: string
+    detail: string
+    estimated?: boolean
+  } | null
   unitTitle?: string
   podcastTitle?: string
   bookTitle?: string
@@ -1237,6 +1252,8 @@ export function App() {
         {view === 'tasks' && (
           <TasksView
             token={token}
+            isAdmin={isAdmin}
+            onNavigate={setView}
             onChanged={() => refresh()}
           />
         )}
@@ -3530,7 +3547,7 @@ function ReportsView({
   )
 }
 
-function TasksView({ token, onChanged }: { token: string; onChanged: () => void }) {
+function TasksView({ token, isAdmin, onNavigate, onChanged }: { token: string; isAdmin: boolean; onNavigate: (view: View) => void; onChanged: () => void }) {
   const [jobs, setJobs] = useState<GenerationJob[]>([])
   const [filter, setFilter] = useState('all')
   const [typeFilter, setTypeFilter] = useState('all')
@@ -3565,6 +3582,10 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
     } finally {
       setBusyId('')
     }
+  }
+
+  function showFallbackRetry(job: GenerationJob) {
+    return job.type === 'generate-podcast' && ['failed', 'canceled'].includes(job.status)
   }
 
   return (
@@ -3650,6 +3671,30 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
                   </div>
                 </div>
               )}
+              {(job.nextActionLabel || job.nextActionDetail || job.autoRetryAt) && (
+                <div className="task-next-action">
+                  <strong>{job.nextActionLabel || '下一步'}</strong>
+                  {job.nextActionDetail && <p>{job.nextActionDetail}</p>}
+                  {job.autoRetryAt && (
+                    <p>
+                      自动重试：{formatDateTime(job.autoRetryAt)}
+                      {job.autoRetryReason ? ` · ${job.autoRetryReason}` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
+              {job.usageSummary && (
+                <div className={job.usageSummary.estimated ? 'task-usage estimated' : 'task-usage'}>
+                  <strong>{job.usageSummary.label}</strong>
+                  <p>{job.usageSummary.detail}</p>
+                </div>
+              )}
+              {job.lastError && (
+                <div className="task-last-error">
+                  <strong>上次失败</strong>
+                  <span>{job.lastErrorStage || job.lastErrorCode || '失败记录'}</span>
+                </div>
+              )}
               {job.error && (
                 <details className="task-error-details">
                   <summary>查看原始错误</summary>
@@ -3684,6 +3729,18 @@ function TasksView({ token, onChanged }: { token: string; onChanged: () => void 
                   >
                     {busyId === job.id ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
                     {job.status === 'succeeded' ? '重新生成' : job.retryable === false ? '需先处理' : '重试任务'}
+                  </button>
+                )}
+                {showFallbackRetry(job) && (
+                  <button type="button" disabled={busyId === job.id} onClick={() => act(job, 'retry-fallback')}>
+                    {busyId === job.id ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+                    用备用源重试
+                  </button>
+                )}
+                {isAdmin && ['provider-auth', 'rate-limit', 'upstream-temporary'].includes(job.errorCode || '') && (
+                  <button type="button" onClick={() => onNavigate('services')}>
+                    <Server size={16} />
+                    查看服务状态
                   </button>
                 )}
               </div>

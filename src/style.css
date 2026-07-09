@@ -707,6 +707,48 @@ p {
   color: var(--ink);
 }
 
+.task-next-action,
+.task-usage,
+.task-last-error {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-2);
+  display: grid;
+  gap: 5px;
+}
+
+.task-next-action {
+  border-color: color-mix(in srgb, var(--green) 22%, var(--line));
+  background: color-mix(in srgb, var(--green-2) 34%, #ffffff);
+}
+
+.task-next-action strong,
+.task-usage strong,
+.task-last-error strong {
+  color: var(--ink);
+}
+
+.task-next-action p,
+.task-usage p {
+  color: var(--muted);
+}
+
+.task-usage.estimated {
+  background: var(--surface);
+}
+
+.task-last-error {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.task-last-error span {
+  overflow-wrap: anywhere;
+}
+
 .task-error-details {
   padding: 10px 12px;
   border: 1px dashed var(--line);

@@ -33,6 +33,8 @@ const loginWindowMs = Number(process.env.LOGIN_WINDOW_MINUTES || 10) * 60 * 1000
 const loginMaxFailures = Number(process.env.LOGIN_MAX_FAILURES || 8)
 const passwordMinLength = Math.max(8, Number(process.env.PASSWORD_MIN_LENGTH || 8))
 const maxAutoRegenAttempts = Number(process.env.MAX_AUTO_REGEN_ATTEMPTS || 1)
+const maxAutoFailureRetries = Math.max(0, Number(process.env.MAX_AUTO_FAILURE_RETRIES || 2))
+const autoFailureRetryBaseSeconds = Math.max(30, Number(process.env.AUTO_FAILURE_RETRY_BASE_SECONDS || 180))
 const maxUploadBytes = bytesFromMegabytes(process.env.MAX_UPLOAD_MB, 50)
 const maxEpubUploadBytes = bytesFromMegabytes(process.env.MAX_EPUB_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
 const maxPdfUploadBytes = bytesFromMegabytes(process.env.MAX_PDF_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
@@ -349,11 +351,21 @@ function isPdfFile(buffer) {
   return Buffer.isBuffer(buffer) && buffer.subarray(0, 5).toString('ascii') === '%PDF-'
 }
 
-function isEpubFile(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 58) return false
-  const isZip = buffer.subarray(0, 4).toString('binary') === 'PK\u0003\u0004'
-  const mimetype = buffer.subarray(30, 58).toString('utf8')
-  return isZip && mimetype === 'application/epub+zip'
+async function isEpubFile(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) return false
+  if (buffer.subarray(0, 4).toString('binary') !== 'PK\u0003\u0004') return false
+  try {
+    const zip = await JSZip.loadAsync(buffer)
+    const names = Object.keys(zip.files || {})
+    if (!names.length) return false
+    const mimetype = await zip.file('mimetype')?.async('string').catch(() => '')
+    if (mimetype && normalizeText(mimetype) !== 'application/epub+zip') return false
+    const container = await zip.file('META-INF/container.xml')?.async('string').catch(() => '')
+    if (!container || !/<rootfile\b/i.test(container) || !/full-path\s*=/i.test(container)) return false
+    return names.some((name) => /\.opf$/i.test(name))
+  } catch {
+    return false
+  }
 }
 
 function sessionExpiresAt(session) {
@@ -2337,8 +2349,13 @@ function geminiTtsFallbackProvider() {
   }
 }
 
-function geminiTtsProviders() {
+function geminiTtsProviders(options = {}) {
   const primaryProviders = geminiTtsPrimaryProviders()
+  const fallback = geminiTtsFallbackProvider()
+  if (options.preferFallback && fallback) {
+    const now = Date.now()
+    return [fallback, ...primaryProviders].filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
+  }
   const providers = []
   if (primaryProviders.length > 1) {
     const offset = geminiOfficialTtsCursor % primaryProviders.length
@@ -2347,7 +2364,6 @@ function geminiTtsProviders() {
   } else {
     providers.push(...primaryProviders)
   }
-  const fallback = geminiTtsFallbackProvider()
   if (fallback) providers.push(fallback)
   const now = Date.now()
   return providers.filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
@@ -2419,11 +2435,11 @@ Do not sound robotic. Do not add extra words.`
   )
 }
 
-async function geminiTtsChunk(text, voiceName) {
+async function geminiTtsChunk(text, voiceName, options = {}) {
   const provider = process.env.AI_PROVIDER || 'auto'
   if (provider === 'mock') return { pcm: mockPodcastPcm(text), provider: 'mock', model: 'mock', mimeType: 'audio/l16; rate=24000; channels=1' }
 
-  const providers = geminiTtsProviders()
+  const providers = geminiTtsProviders(options)
   if (!providers.length) throw new Error('未配置 Gemini TTS API key')
 
   const errors = []
@@ -2442,7 +2458,7 @@ async function geminiTtsChunk(text, voiceName) {
   throw new Error(`Gemini TTS 全部来源失败：${errors.join(' | ')}`)
 }
 
-async function synthesizePodcastAudio(podcast, onProgress = async () => undefined) {
+async function synthesizePodcastAudio(podcast, onProgress = async () => undefined, options = {}) {
   const voice = podcast.audio?.voice || podcast.voice || process.env.GEMINI_TTS_VOICE || 'Kore'
   const chunks = chunkTextForTts(podcast.scriptText || '')
   if (!chunks.length) throw new Error('脚本为空，无法合成')
@@ -2459,7 +2475,7 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     while (cursor < chunks.length) {
       const index = cursor
       cursor += 1
-      const result = await geminiTtsChunk(chunks[index], voice)
+      const result = await geminiTtsChunk(chunks[index], voice, options)
       pcmParts[index] = result.pcm
       if (result.provider) usedProviders.add(result.provider)
       if (result.model) usedModels.add(result.model)
@@ -4101,6 +4117,9 @@ function clearJobDiagnosis(job) {
   delete job.provider
   delete job.statusCode
   delete job.diagnosedAt
+  delete job.autoRetryAt
+  delete job.autoRetryDelaySeconds
+  delete job.autoRetryReason
 }
 
 function parseStatusCode(message) {
@@ -4209,6 +4228,220 @@ function markJobFailed(job, errorOrMessage, options = {}) {
   applyJobDiagnosis(job, job.error, options)
 }
 
+function formatRelativeSeconds(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds || 0)))
+  if (value < 60) return `${value || 1} 秒`
+  const minutes = Math.round(value / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  return `${Math.round(minutes / 60)} 小时`
+}
+
+function secondsUntil(isoTime) {
+  const target = Date.parse(isoTime || '')
+  if (!Number.isFinite(target)) return 0
+  return Math.max(0, Math.ceil((target - Date.now()) / 1000))
+}
+
+function canAutoRetryJob(job) {
+  if (!job || maxAutoFailureRetries <= 0 || job.retryable === false || job.cancelRequested) return false
+  if (!['rate-limit', 'upstream-temporary'].includes(job.errorCode || '')) return false
+  return Number(job.retryCount || 0) < maxAutoFailureRetries
+}
+
+function scheduleAutoRetryJob(job) {
+  if (!canAutoRetryJob(job)) return false
+  const attempt = Number(job.retryCount || 0) + 1
+  const delaySeconds = Math.min(30 * 60, autoFailureRetryBaseSeconds * 2 ** Math.max(0, attempt - 1))
+  job.autoRetryAt = new Date(Date.now() + delaySeconds * 1000).toISOString()
+  job.autoRetryDelaySeconds = delaySeconds
+  job.autoRetryReason =
+    job.errorCode === 'rate-limit'
+      ? '检测到限流或额度暂时不可用，系统会先等待再自动重试。'
+      : '检测到上游服务或网络临时异常，系统会自动重试一次。'
+  job.message = `${job.message || '生成失败'}，已安排 ${formatRelativeSeconds(delaySeconds)} 后自动重试`
+  return true
+}
+
+function promoteDueAutoRetryJobs(db) {
+  const now = Date.now()
+  let changed = false
+  let nextDelayMs = 0
+  for (const job of db.jobs || []) {
+    if (job.status !== 'failed' || !job.autoRetryAt) continue
+    const retryAt = Date.parse(job.autoRetryAt)
+    if (!Number.isFinite(retryAt)) continue
+    if (retryAt > now) {
+      const delay = retryAt - now
+      nextDelayMs = nextDelayMs ? Math.min(nextDelayMs, delay) : delay
+      continue
+    }
+
+    const lastError = job.error || job.message || ''
+    const lastErrorCode = job.errorCode || ''
+    const lastErrorStage = job.errorStage || ''
+    const retryCount = Number(job.retryCount || 0) + 1
+    clearJobDiagnosis(job)
+    job.lastError = lastError
+    job.lastErrorCode = lastErrorCode
+    job.lastErrorStage = lastErrorStage
+    job.retryCount = retryCount
+    job.status = 'queued'
+    job.progress = 0
+    job.error = ''
+    job.cancelRequested = false
+    job.message = `自动重试 ${retryCount}/${maxAutoFailureRetries}`
+    job.finishedAt = null
+    job.updatedAt = new Date().toISOString()
+
+    const unit = db.units.find((item) => item.id === job.unitId)
+    if (unit) {
+      unit.generation = {
+        ...(unit.generation || {}),
+        jobId: job.id,
+        status: 'queued',
+        progress: 0,
+        message: job.message,
+      }
+    }
+    const podcast = db.podcasts.find((item) => item.id === job.podcastId && item.userId === job.userId)
+    if (podcast) {
+      podcast.status = 'planned'
+      podcast.error = ''
+      podcast.updatedAt = job.updatedAt
+    }
+    changed = true
+  }
+  return { changed, nextDelayMs }
+}
+
+function jobNextAction(job) {
+  const retryIn = secondsUntil(job.autoRetryAt)
+  if (retryIn > 0) {
+    return {
+      nextActionKind: 'wait',
+      nextActionLabel: '等待自动重试',
+      nextActionDetail: `系统将在约 ${formatRelativeSeconds(retryIn)} 后自动重试。你也可以手动取消或稍后查看结果。`,
+    }
+  }
+  if (job.status === 'running') {
+    return {
+      nextActionKind: 'wait',
+      nextActionLabel: '等待当前任务',
+      nextActionDetail: '任务正在运行，暂时不用操作。长时间卡住时可以取消后重新加入队列。',
+    }
+  }
+  if (job.status === 'queued' || job.status === 'paused') {
+    return {
+      nextActionKind: job.status === 'paused' ? 'resume' : 'wait',
+      nextActionLabel: job.status === 'paused' ? '恢复任务' : '等待排队',
+      nextActionDetail: job.status === 'paused' ? '任务已暂停，需要时点击恢复。' : '任务已在队列里，会按顺序执行。',
+    }
+  }
+  if (job.status === 'succeeded') {
+    return {
+      nextActionKind: 'done',
+      nextActionLabel: '无需处理',
+      nextActionDetail: '任务已经完成。只有想刷新内容时才需要重新生成。',
+    }
+  }
+  if (job.errorCode === 'provider-auth') {
+    return {
+      nextActionKind: 'service',
+      nextActionLabel: '先检查服务配置',
+      nextActionDetail: '密钥、模型或网关配置不可用。先到 AI 服务页测试对应来源，再重试任务。',
+    }
+  }
+  if (job.errorCode === 'rate-limit') {
+    return {
+      nextActionKind: 'wait',
+      nextActionLabel: '等待额度恢复',
+      nextActionDetail: '这是限流或额度问题。建议等几分钟，减少批量数量，或切换可用的备用来源。',
+    }
+  }
+  if (job.errorCode === 'upstream-temporary') {
+    return {
+      nextActionKind: 'retry',
+      nextActionLabel: '可以直接重试',
+      nextActionDetail: '这是上游或网络临时异常。通常等待一下再重试即可。',
+    }
+  }
+  if (job.errorCode === 'ocr-failed') {
+    return {
+      nextActionKind: 'replace-file',
+      nextActionLabel: '换文字版或更清晰 PDF',
+      nextActionDetail: 'OCR 没识别出足够正文。优先使用文字版 PDF，或换方向正确、清晰度更高的文件。',
+    }
+  }
+  if (job.errorCode === 'quality-review') {
+    return {
+      nextActionKind: 'retry',
+      nextActionLabel: '重新生成更忠实版本',
+      nextActionDetail: '质量检查认为内容不够稳。重试会重新生成，并继续做质量检查。',
+    }
+  }
+  if (job.status === 'canceled') {
+    return {
+      nextActionKind: 'retry',
+      nextActionLabel: '需要时重新生成',
+      nextActionDetail: '任务是手动取消的，点击重试会重新排队。',
+    }
+  }
+  return {
+    nextActionKind: job.retryable === false ? 'fix' : 'retry',
+    nextActionLabel: job.retryable === false ? '先处理问题' : '可以重试',
+    nextActionDetail: job.retryable === false ? '这个失败通常不是临时波动，需要先处理配置、文件或材料。' : '如果不是连续失败，可以直接重试一次。',
+  }
+}
+
+function usageText(summary) {
+  const parts = []
+  if (summary.inputTokens) parts.push(`输入约 ${formatServiceNumber(summary.inputTokens)} tokens`)
+  if (summary.outputTokens) parts.push(`输出约 ${formatServiceNumber(summary.outputTokens)} tokens`)
+  if (summary.audioSeconds) parts.push(`音频约 ${formatRelativeSeconds(summary.audioSeconds)}`)
+  if (summary.audioBytes) parts.push(`音频 ${formatBytes(summary.audioBytes)}`)
+  if (summary.pages) parts.push(`OCR ${summary.pages} 页`)
+  if (summary.chunks) parts.push(`${summary.chunks} 块`)
+  if (summary.failed) parts.push(`失败 ${summary.failed} 次`)
+  return parts.join(' · ')
+}
+
+function jobUsageSummary(job, db) {
+  const records = (db?.aiUsage || []).filter((item) => item.userId === job.userId && item.jobId === job.id)
+  if (records.length) {
+    const summary = summarizeUsageRecords(records)
+    return {
+      label: `已记录 ${summary.calls} 次服务调用`,
+      detail: usageText(summary) || '这次任务没有记录到明显 token、音频或页数消耗。',
+      estimated: false,
+    }
+  }
+
+  const unit = db?.units?.find((item) => item.id === job.unitId)
+  const podcast = db?.podcasts?.find((item) => item.id === job.podcastId)
+  if (unit) {
+    const inputTokens = estimateTextTokens(unit.sourceText || unit.sourceExcerpt || '')
+    return {
+      label: '预计文本生成消耗',
+      detail: `输入约 ${formatServiceNumber(inputTokens)} tokens；实际用量会在任务运行后记录。`,
+      estimated: true,
+    }
+  }
+  if (podcast) {
+    const inputTokens = estimateTtsInputTokens(podcast.scriptText || podcast.sourceText || '')
+    const chunks = chunkTextForTts(podcast.scriptText || podcast.sourceText || '').length
+    return {
+      label: '预计播客生成消耗',
+      detail: `输入约 ${formatServiceNumber(inputTokens)} tokens · ${chunks || 1} 块；音频合成成功后会记录秒数和文件大小。`,
+      estimated: true,
+    }
+  }
+  return {
+    label: '暂无消耗记录',
+    detail: '任务还没有开始调用外部服务，或旧任务没有记录到用量。',
+    estimated: true,
+  }
+}
+
 function appendErrorLog(db, entry = {}) {
   if (!db) return null
   db.errorLogs = Array.isArray(db.errorLogs) ? db.errorLogs : []
@@ -4266,6 +4499,7 @@ function recordAiUsage(db, entry = {}) {
   const record = {
     id: nanoid(),
     userId: entry.userId,
+    jobId: String(entry.jobId || '').slice(0, 80),
     category: String(entry.category || 'text').slice(0, 32),
     action: String(entry.action || 'unknown').slice(0, 64),
     provider: sanitizeServiceMessage(entry.provider || '').slice(0, 80),
@@ -4578,12 +4812,17 @@ async function buildAdminStatusPayload(db, userId) {
   }
 }
 
-function publicJob(job) {
+function publicJob(job, db = null) {
   if (!job) return null
   const fallbackDiagnosis =
     !job.errorHint && ['failed', 'canceled'].includes(job.status) && (job.error || job.message)
       ? diagnoseJobError(job, job.error || job.message, { stage: job.status === 'canceled' ? 'cancel' : '' })
       : null
+  const nextAction = jobNextAction({
+    ...job,
+    errorCode: job.errorCode || fallbackDiagnosis?.errorCode || '',
+    retryable: job.retryable === undefined ? fallbackDiagnosis?.retryable !== false : job.retryable !== false,
+  })
   return {
     id: job.id,
     type: job.type,
@@ -4602,6 +4841,15 @@ function publicJob(job) {
     statusCode: job.statusCode || fallbackDiagnosis?.statusCode || null,
     retryCount: Number(job.retryCount || 0),
     qualityStatus: job.qualityStatus || '',
+    autoRetryAt: job.autoRetryAt || '',
+    autoRetryDelaySeconds: Number(job.autoRetryDelaySeconds || 0),
+    autoRetryReason: job.autoRetryReason || '',
+    lastError: job.lastError || '',
+    lastErrorCode: job.lastErrorCode || '',
+    lastErrorStage: job.lastErrorStage || '',
+    canRetryNow: !job.autoRetryAt || secondsUntil(job.autoRetryAt) <= 0,
+    usageSummary: db ? jobUsageSummary(job, db) : null,
+    ...nextAction,
     createdAt: job.createdAt,
     startedAt: job.startedAt || null,
     finishedAt: job.finishedAt || null,
@@ -4609,7 +4857,7 @@ function publicJob(job) {
 }
 
 function publicJobWithContext(job, db) {
-  const output = publicJob(job)
+  const output = publicJob(job, db)
   if (!output) return null
   const unit = db.units.find((item) => item.id === job.unitId)
   const podcast = db.podcasts.find((item) => item.id === job.podcastId)
@@ -4757,6 +5005,7 @@ async function failPodcastJob(jobId, message, options = {}) {
   } else {
     markJobFailed(job, message || '播客生成失败', { ...options, message: '播客生成失败' })
   }
+  const scheduledAutoRetry = job.status === 'failed' ? scheduleAutoRetryJob(job) : false
   if (podcast) {
     podcast.status = 'failed'
     podcast.error = job.error || job.message
@@ -4775,6 +5024,7 @@ async function failPodcastJob(jobId, message, options = {}) {
     })
   }
   await writeDb(db)
+  if (scheduledAutoRetry) setTimeout(processJobQueue, Math.min(Number(job.autoRetryDelaySeconds || autoFailureRetryBaseSeconds) * 1000 + 250, 2_147_483_647))
 }
 
 async function processPodcastJob(jobId) {
@@ -4805,6 +5055,7 @@ async function processPodcastJob(jobId) {
       const source = textAiUsageSource()
       await persistAiUsage({
         userId: job.userId,
+        jobId: job.id,
         category: 'text',
         action: 'generate-podcast-script',
         ...source,
@@ -4840,6 +5091,7 @@ async function processPodcastJob(jobId) {
     const source = textAiUsageSource()
     recordAiUsage(db, {
       userId: job.userId,
+      jobId: job.id,
       category: 'text',
       action: 'generate-podcast-script',
       ...source,
@@ -4853,13 +5105,18 @@ async function processPodcastJob(jobId) {
 
   let audio = null
   try {
-    audio = await synthesizePodcastAudio(podcast, async (percent, done, total) => {
-      const progress = 35 + Math.round(percent * 0.6)
-      await updatePodcastJobProgress(podcast.id, job.id, progress, `正在合成音频 ${done}/${total}`)
-    })
+    audio = await synthesizePodcastAudio(
+      podcast,
+      async (percent, done, total) => {
+        const progress = 35 + Math.round(percent * 0.6)
+        await updatePodcastJobProgress(podcast.id, job.id, progress, `正在合成音频 ${done}/${total}`)
+      },
+      { preferFallback: Boolean(job.preferTtsFallback || podcast.preferTtsFallback) }
+    )
   } catch (error) {
     await persistAiUsage({
       userId: job.userId,
+      jobId: job.id,
       category: 'audio',
       action: 'generate-podcast-tts',
       provider: 'Gemini TTS',
@@ -4882,6 +5139,7 @@ async function processPodcastJob(jobId) {
   podcast.audio = audio
   recordAiUsage(db, {
     userId: job.userId,
+    jobId: job.id,
     category: 'audio',
     action: 'generate-podcast-tts',
     provider: audio.provider || 'Gemini TTS',
@@ -4909,6 +5167,9 @@ async function processJobQueue() {
   try {
     while (true) {
       let db = await readDb()
+      const autoRetry = promoteDueAutoRetryJobs(db)
+      if (autoRetry.changed) await writeDb(db)
+      if (autoRetry.nextDelayMs) setTimeout(processJobQueue, Math.min(autoRetry.nextDelayMs + 250, 2_147_483_647))
       let job = db.jobs.find((item) => ['generate-unit', 'generate-podcast'].includes(item.type) && item.status === 'queued')
       if (!job) break
 
@@ -4986,6 +5247,7 @@ async function processJobQueue() {
           const source = textAiUsageSource()
           recordAiUsage(db, {
             userId: job.userId,
+            jobId: job.id,
             category: 'text',
             action: 'generate-unit',
             ...source,
@@ -4996,6 +5258,7 @@ async function processJobQueue() {
           })
         }
         markJobFailed(job, failure || 'AI 未返回学习单元', { stage: 'unit-generation' })
+        const scheduledAutoRetry = scheduleAutoRetryJob(job)
         appendErrorLog(db, {
           scope: 'job',
           message: job.error || job.message,
@@ -5016,6 +5279,7 @@ async function processJobQueue() {
           finishedAt: job.finishedAt,
         }
         await writeDb(db)
+        if (scheduledAutoRetry) setTimeout(processJobQueue, Math.min(Number(job.autoRetryDelaySeconds || autoFailureRetryBaseSeconds) * 1000 + 250, 2_147_483_647))
         continue
       }
 
@@ -5024,6 +5288,7 @@ async function processJobQueue() {
         const usedAi = content.generationMode !== 'local-demo'
         recordAiUsage(db, {
           userId: job.userId,
+          jobId: job.id,
           category: 'text',
           action: 'generate-unit',
           ...source,
@@ -5367,20 +5632,20 @@ async function createApp() {
         res.status(400).json({ error: '目前支持 EPUB 和 PDF 文件' })
         return
       }
-      if (ext === '.epub' && !isEpubFile(req.file.buffer)) {
-        res.status(400).json({ error: '文件内容不像有效的 EPUB，请确认文件没有损坏' })
-        return
-      }
-      if (ext === '.pdf' && !isPdfFile(req.file.buffer)) {
-        res.status(400).json({ error: '文件内容不像有效的 PDF，请确认文件没有损坏' })
-        return
-      }
       if (ext === '.epub' && req.file.size > maxEpubUploadBytes) {
         res.status(400).json({ error: `EPUB 第一版建议不超过 ${formatMegabytes(maxEpubUploadBytes)}` })
         return
       }
       if (ext === '.pdf' && req.file.size > maxPdfUploadBytes) {
         res.status(400).json({ error: `PDF 第一版建议不超过 ${formatMegabytes(maxPdfUploadBytes)}` })
+        return
+      }
+      if (ext === '.epub' && !(await isEpubFile(req.file.buffer))) {
+        res.status(400).json({ error: '文件内容不像有效的 EPUB，请确认文件没有损坏' })
+        return
+      }
+      if (ext === '.pdf' && !isPdfFile(req.file.buffer)) {
+        res.status(400).json({ error: '文件内容不像有效的 PDF，请确认文件没有损坏' })
         return
       }
 
@@ -5964,16 +6229,21 @@ async function createApp() {
       job.cancelRequested = true
       job.message = '任务将在当前生成结束后取消'
       job.updatedAt = now
-    } else if (action === 'retry' && ['failed', 'canceled'].includes(job.status)) {
+    } else if (['retry', 'retry-fallback'].includes(action) && ['failed', 'canceled'].includes(job.status)) {
       if (job.type === 'generate-podcast' && shouldRateLimitPodcast() && !consumeUserQuota(req, res, 'generate-podcast')) return
       if (job.type !== 'generate-podcast' && shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
+      if (action === 'retry-fallback' && job.type !== 'generate-podcast') {
+        res.status(400).json({ error: '只有播客任务支持备用 TTS 来源重试' })
+        return
+      }
       job.status = 'queued'
       job.progress = 0
       job.error = ''
       clearJobDiagnosis(job)
       job.cancelRequested = false
+      job.preferTtsFallback = action === 'retry-fallback'
       job.retryCount = Number(job.retryCount || 0) + 1
-      job.message = '已重新加入队列'
+      job.message = action === 'retry-fallback' ? '已用备用 TTS 来源重新加入队列' : '已重新加入队列'
       job.finishedAt = null
       job.updatedAt = now
       if (unit) {
@@ -5988,6 +6258,7 @@ async function createApp() {
       if (podcast) {
         podcast.status = 'planned'
         podcast.error = ''
+        podcast.preferTtsFallback = action === 'retry-fallback'
         podcast.updatedAt = now
       }
       setTimeout(processJobQueue, 0)
