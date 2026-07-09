@@ -40,6 +40,8 @@ const maxEpubUploadBytes = bytesFromMegabytes(process.env.MAX_EPUB_UPLOAD_MB, Ma
 const maxPdfUploadBytes = bytesFromMegabytes(process.env.MAX_PDF_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
 const maxEpubExpandedBytes = bytesFromMegabytes(process.env.MAX_EPUB_EXPANDED_MB, 200)
 const maxEpubEntries = Number(process.env.MAX_EPUB_ENTRIES || 2000)
+const sourceWordsPerUnit = Math.max(600, Math.min(3500, Number(process.env.SOURCE_WORDS_PER_UNIT || 1700)))
+const sourceWordsMergeMin = Math.max(300, Math.min(sourceWordsPerUnit, Number(process.env.SOURCE_WORDS_MIN_PER_UNIT || Math.round(sourceWordsPerUnit * 0.7))))
 const pdfOcrEnabled = parseBoolean(process.env.PDF_OCR_ENABLED, true)
 const pdfOcrProvider = String(process.env.PDF_OCR_PROVIDER || 'hunyuan-first').toLowerCase()
 const pdfOcrLanguage = String(process.env.PDF_OCR_LANGUAGE || 'eng')
@@ -1373,36 +1375,137 @@ function unitTitleFallback(chapter, sourceType) {
   return chapter.title
 }
 
+function combineSourceLocations(parts) {
+  const locations = parts.map((part) => part.sourceLocation).filter(Boolean)
+  if (!locations.length) return ''
+  if (locations.length === 1 || locations[0] === locations[locations.length - 1]) return locations[0]
+  return `${locations[0]} → ${locations[locations.length - 1]}`
+}
+
+function mergeShortSourceParts(parts, targetWords = sourceWordsPerUnit) {
+  const merged = []
+  const maxWords = Math.round(targetWords * 1.18)
+  let current = null
+
+  function pushCurrent() {
+    if (!current) return
+    current.sourceLocation = combineSourceLocations(current.parts)
+    merged.push(current)
+    current = null
+  }
+
+  for (const part of parts) {
+    const partWords = wordCount(part.sourceText)
+    if (!current) {
+      current = { ...part, parts: [part] }
+      continue
+    }
+    const currentWords = wordCount(current.sourceText)
+    if (currentWords < sourceWordsMergeMin && currentWords + partWords <= maxWords) {
+      current.sourceText = normalizeText(`${current.sourceText}\n\n${part.sourceText}`)
+      current.parts.push(part)
+      current.sourceLocation = combineSourceLocations(current.parts)
+    } else {
+      pushCurrent()
+      current = { ...part, parts: [part] }
+    }
+  }
+  pushCurrent()
+
+  if (merged.length >= 2) {
+    const last = merged[merged.length - 1]
+    const previous = merged[merged.length - 2]
+    const lastWords = wordCount(last.sourceText)
+    const previousWords = wordCount(previous.sourceText)
+    if (lastWords < sourceWordsMergeMin && previousWords + lastWords <= maxWords) {
+      previous.sourceText = normalizeText(`${previous.sourceText}\n\n${last.sourceText}`)
+      previous.parts.push(...last.parts)
+      previous.sourceLocation = combineSourceLocations(previous.parts)
+      merged.pop()
+    }
+  }
+
+  return merged.map(({ parts, ...part }) => part)
+}
+
 function planUnits(bookId, chapters, sourceType) {
-  const units = []
+  const rawParts = []
   const studyChapters = chapters.filter(isStudyChapter)
   const maxUnits = Number(process.env.MAX_UNITS_PER_BOOK || 240)
 
   for (const chapter of studyChapters) {
-    const parts = splitIntoSourceUnits(chapter.text, 1700)
+    const parts = splitIntoSourceUnits(chapter.text, sourceWordsPerUnit)
     parts.forEach((sourceText, index) => {
-      const title = inferEnglishTitle(sourceText, unitTitleFallback(chapter, sourceType), index)
       const location =
         sourceType === 'pdf'
           ? pdfUnitSourceLocation(chapter, parts.length, index)
           : `${chapter.title}${parts.length > 1 ? `, section ${index + 1}` : ''}`
 
-      units.push({
-        id: nanoid(),
-        bookId,
-        title,
-        status: 'planned',
+      rawParts.push({
+        fallbackTitle: unitTitleFallback(chapter, sourceType),
         sourceLocation: location,
         sourceText,
-        sourceExcerpt: takeWords(sourceText, 180),
-        sourceWordCount: wordCount(sourceText),
-        createdAt: new Date().toISOString(),
-        generatedAt: null,
-        content: null,
       })
     })
   }
+
+  const plannedParts = sourceType === 'pdf' ? mergeShortSourceParts(rawParts, sourceWordsPerUnit) : rawParts
+  const units = plannedParts.map((part, index) => {
+    const sourceText = part.sourceText
+    const title = inferEnglishTitle(sourceText, part.fallbackTitle, index)
+    return {
+      id: nanoid(),
+      bookId,
+      title,
+      status: 'planned',
+      sourceLocation: part.sourceLocation,
+      sourceText,
+      sourceExcerpt: takeWords(sourceText, 180),
+      sourceWordCount: wordCount(sourceText),
+      createdAt: new Date().toISOString(),
+      generatedAt: null,
+      content: null,
+    }
+  })
   return units.slice(0, maxUnits)
+}
+
+async function rebuildBookUnitsFromSource(db, book) {
+  if (!book?.sourcePath) {
+    const error = new Error('这本书没有保留原始文件，无法重建单元')
+    error.status = 409
+    throw error
+  }
+
+  const existingUnits = db.units.filter((unit) => unit.bookId === book.id)
+  const unitIds = new Set(existingUnits.map((unit) => unit.id))
+  const hasGenerated = existingUnits.some((unit) => unit.content || unit.status !== 'planned')
+  const hasProgress = db.progress.some((item) => unitIds.has(item.unitId))
+  const hasReports = db.reports.some((item) => item.bookId === book.id || unitIds.has(item.unitId))
+  const hasActiveJobs = db.jobs.some(
+    (job) => (job.bookId === book.id || unitIds.has(job.unitId)) && ['queued', 'running', 'paused'].includes(job.status)
+  )
+  if (hasGenerated || hasProgress || hasReports || hasActiveJobs) {
+    const error = new Error('这本书已有生成内容、学习进度或任务，暂不自动重建单元')
+    error.status = 409
+    throw error
+  }
+
+  const buffer = await fs.readFile(book.sourcePath)
+  const parsed = book.type === 'epub' ? await parseEpub(buffer, book.filename) : await parsePdf(buffer, book.filename)
+  const units = planUnits(book.id, parsed.chapters, parsed.type)
+  db.units = db.units.filter((unit) => unit.bookId !== book.id)
+  db.units.push(...units)
+  db.jobs = db.jobs.filter((job) => job.bookId !== book.id && !unitIds.has(job.unitId))
+  book.chapterCount = parsed.chapters.length
+  book.wordCount = parsed.chapters.reduce((total, chapter) => total + Number(chapter.wordCount || wordCount(chapter.text)), 0)
+  book.status = 'ready'
+  book.updatedAt = new Date().toISOString()
+  return {
+    book,
+    units,
+    previousUnitCount: existingUnits.length,
+  }
 }
 
 function isStudyChapter(chapter) {
@@ -6039,6 +6142,26 @@ async function createApp() {
     res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) } })
   })
 
+  app.post('/api/books/:bookId/replan', auth, async (req, res, next) => {
+    try {
+      const db = req.db
+      const book = db.books.find((item) => item.id === req.params.bookId && item.userId === req.user.id)
+      if (!book) {
+        res.status(404).json({ error: '未找到这本书' })
+        return
+      }
+      const result = await rebuildBookUnitsFromSource(db, book)
+      await writeDb(db)
+      res.json({
+        book: { ...summarizeBook(book, result.units), glossary: buildBookGlossary(book, result.units) },
+        units: result.units.map((unit) => publicUnit(unit, db, req.user.id)),
+        previousUnitCount: result.previousUnitCount,
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.delete('/api/books/:bookId', auth, async (req, res, next) => {
     try {
       const db = req.db
@@ -6947,23 +7070,69 @@ async function createApp() {
   return app
 }
 
-createApp().then((app) => {
-  const server = app.listen(port, '0.0.0.0', () => {
-    console.log(`LinguaShelf running at http://localhost:${port}`)
+function cliArgValue(name) {
+  const index = process.argv.indexOf(name)
+  if (index === -1) return ''
+  return String(process.argv[index + 1] || '')
+}
+
+async function runReplanBookCli() {
+  await ensureStore()
+  const db = await readDb()
+  const bookId = cliArgValue('--book-id')
+  const title = cliArgValue('--book-title')
+  const book = db.books.find((item) => (bookId && item.id === bookId) || (title && String(item.title || item.filename || '').includes(title)))
+  if (!book) throw new Error('未找到要重建单元的书籍，请提供 --book-id 或 --book-title')
+  const result = await rebuildBookUnitsFromSource(db, book)
+  await writeDb(db)
+  const counts = result.units.map((unit) => Number(unit.sourceWordCount || 0)).sort((a, b) => a - b)
+  const sum = counts.reduce((total, count) => total + count, 0)
+  console.log(
+    JSON.stringify(
+      {
+        bookId: book.id,
+        title: book.title,
+        previousUnitCount: result.previousUnitCount,
+        unitCount: result.units.length,
+        sourceWordsPerUnit,
+        sourceWordsMergeMin,
+        min: counts[0] || 0,
+        median: counts[Math.floor(counts.length / 2)] || 0,
+        avg: counts.length ? Math.round(sum / counts.length) : 0,
+        max: counts[counts.length - 1] || 0,
+      },
+      null,
+      2
+    )
+  )
+  closeStore()
+}
+
+if (process.argv.includes('--replan-book')) {
+  runReplanBookCli().catch((error) => {
+    console.error(error)
+    closeStore()
+    process.exit(1)
   })
-
-  function shutdown(signal) {
-    console.log(`Received ${signal}, shutting down...`)
-    server.close(() => {
-      closeStore()
-      process.exit(0)
+} else {
+  createApp().then((app) => {
+    const server = app.listen(port, '0.0.0.0', () => {
+      console.log(`LinguaShelf running at http://localhost:${port}`)
     })
-    setTimeout(() => {
-      closeStore()
-      process.exit(1)
-    }, 10000).unref()
-  }
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
-  process.on('SIGINT', () => shutdown('SIGINT'))
-})
+    function shutdown(signal) {
+      console.log(`Received ${signal}, shutting down...`)
+      server.close(() => {
+        closeStore()
+        process.exit(0)
+      })
+      setTimeout(() => {
+        closeStore()
+        process.exit(1)
+      }, 10000).unref()
+    }
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'))
+    process.on('SIGINT', () => shutdown('SIGINT'))
+  })
+}
