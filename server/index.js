@@ -1751,12 +1751,14 @@ function buildStrictFidelityPrompt(unit, settings = {}) {
     .filter((item) => !item.sourceRefs?.length)
     .map((item) => `reading paragraph ${item.readingParagraph}`)
     .slice(0, 8)
+  const explicitRepairNotes = Array.isArray(settings.fidelityRepairNotes) ? settings.fidelityRepairNotes.slice(0, 10) : []
 
   const repairNotes = []
   if (unsupportedClaims.length) repairNotes.push(`Unsupported claims from the previous audit: ${unsupportedClaims.join(' | ')}`)
   if (missingImportantIdeas.length) repairNotes.push(`Important source ideas possibly missed: ${missingImportantIdeas.join(' | ')}`)
   if (missingKeywords.length) repairNotes.push(`Source keywords or ideas to preserve when genuinely central: ${missingKeywords.join(', ')}`)
   if (unmappedParagraphs.length) repairNotes.push(`Previous reading paragraphs without clear source mapping: ${unmappedParagraphs.join(', ')}`)
+  repairNotes.push(...explicitRepairNotes.map((note) => `Latest failed draft issue: ${note}`))
 
   return `
 
@@ -3007,6 +3009,173 @@ function summarizeBook(book, units) {
   return { ...book, totalUnits: total, generatedUnits: generated, completedUnits: completed }
 }
 
+const glossaryCategoryLabels = {
+  concept: '概念',
+  person: '人名',
+  place: '地名',
+  institution: '机构/政权',
+  term: '术语',
+}
+
+function cleanGlossaryTerm(value) {
+  return normalizeText(value)
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9.()' -]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+}
+
+function countTermOccurrences(text, term) {
+  const source = String(text || '').toLowerCase()
+  const needle = String(term || '').toLowerCase()
+  if (!source || !needle) return 0
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matches = source.match(new RegExp(`\\b${escaped}\\b`, 'g'))
+  return matches ? matches.length : 0
+}
+
+function classifyProperNoun(term) {
+  const value = String(term || '')
+  const lower = value.toLowerCase()
+  const institutionWords = [
+    'government',
+    'parliament',
+    'congress',
+    'council',
+    'court',
+    'company',
+    'bank',
+    'party',
+    'army',
+    'empire',
+    'dynasty',
+    'kingdom',
+    'republic',
+    'ministry',
+    'committee',
+    'university',
+    'administration',
+  ]
+  const placeWords = ['city', 'province', 'state', 'river', 'fort', 'palace', 'gate', 'road', 'street', 'sea', 'bay', 'island', 'delhi', 'india', 'britain', 'england', 'europe', 'asia', 'america']
+  if (institutionWords.some((word) => lower.includes(word))) return 'institution'
+  if (placeWords.some((word) => lower.includes(word))) return 'place'
+  const capitalizedParts = value.match(/\b[A-Z][a-z]+(?:'[a-z]+)?\b/g) || []
+  if (capitalizedParts.length >= 2) return 'person'
+  return 'place'
+}
+
+function extractProperNounCandidates(text, limit = 30) {
+  const candidates = new Map()
+  const matches = String(text || '').match(/\b(?:[A-Z][a-z]+|[A-Z]{2,})(?:\s+(?:of|and|the|for|de|al|[A-Z][a-z]+|[A-Z]{2,})){0,4}\b/g) || []
+  const blocked = new Set([
+    'The',
+    'This',
+    'That',
+    'These',
+    'Those',
+    'When',
+    'Where',
+    'After',
+    'Before',
+    'Because',
+    'However',
+    'English',
+    'Reading',
+    'Source',
+    'Paragraph',
+    'Chapter',
+    'Section',
+  ])
+
+  for (const raw of matches) {
+    const term = cleanGlossaryTerm(raw)
+    if (!term || term.length < 4 || blocked.has(term)) continue
+    if (/^(The|This|That|When|Where|After|Before)\s+[a-z]/.test(term)) continue
+    const words = term.split(/\s+/)
+    if (words.length === 1 && !/[A-Z]{2,}/.test(term) && countTermOccurrences(text, term) < 2) continue
+    const key = term.toLowerCase()
+    candidates.set(key, {
+      term,
+      category: classifyProperNoun(term),
+      count: (candidates.get(key)?.count || 0) + 1,
+    })
+  }
+
+  return [...candidates.values()].sort((a, b) => b.count - a.count).slice(0, limit)
+}
+
+function buildBookGlossary(book, units) {
+  const entries = new Map()
+  const addEntry = (termValue, category, unit, extra = {}) => {
+    const term = cleanGlossaryTerm(termValue)
+    if (!term || term.length < 3) return
+    const key = term.toLowerCase()
+    const sourceText = `${unit?.sourceText || ''}\n${JSON.stringify(unit?.content || {})}`
+    const occurrence = countTermOccurrences(sourceText, term)
+    const existing =
+      entries.get(key) || {
+        id: key.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || nanoid(),
+        term,
+        category,
+        categoryLabel: glossaryCategoryLabels[category] || glossaryCategoryLabels.term,
+        meaningZh: '',
+        simpleEnglish: '',
+        occurrenceCount: 0,
+        unitCount: 0,
+        sources: [],
+        sourceTitles: new Set(),
+      }
+    existing.category = existing.category === 'term' && category !== 'term' ? category : existing.category
+    existing.categoryLabel = glossaryCategoryLabels[existing.category] || glossaryCategoryLabels.term
+    existing.meaningZh = existing.meaningZh || extra.meaningZh || extra.chinese || ''
+    existing.simpleEnglish = existing.simpleEnglish || extra.simpleEnglish || ''
+    existing.occurrenceCount += Math.max(1, occurrence)
+    if (unit?.id && !existing.sourceTitles.has(unit.id)) {
+      existing.sourceTitles.add(unit.id)
+      existing.unitCount += 1
+      existing.sources.push({
+        unitId: unit.id,
+        unitTitle: unit.title,
+        sourceLocation: unit.sourceLocation,
+      })
+    }
+    entries.set(key, existing)
+  }
+
+  for (const unit of units) {
+    for (const concept of unit.content?.concepts || []) addEntry(concept.term, 'concept', unit, concept)
+    for (const item of unit.content?.vocabulary || []) addEntry(item.term, 'term', unit, item)
+    for (const candidate of extractProperNounCandidates(`${unit.sourceText || ''}\n${unit.sourceExcerpt || ''}`, 20)) {
+      addEntry(candidate.term, candidate.category, unit)
+    }
+  }
+
+  const categoryOrder = ['concept', 'person', 'place', 'institution', 'term']
+  const items = [...entries.values()]
+    .map((item) => {
+      const { sourceTitles, ...safeItem } = item
+      return {
+        ...safeItem,
+        sources: safeItem.sources.slice(0, 4),
+      }
+    })
+    .filter((item) => item.occurrenceCount >= 2 || item.category === 'concept' || item.category === 'term')
+    .sort((a, b) => {
+      const categoryDiff = categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category)
+      if (categoryDiff) return categoryDiff
+      return b.occurrenceCount - a.occurrenceCount || a.term.localeCompare(b.term)
+    })
+    .slice(0, 80)
+
+  return {
+    bookId: book.id,
+    itemCount: items.length,
+    generatedUnitCount: units.filter((unit) => unit.content).length,
+    sourceUnitCount: units.length,
+    items,
+  }
+}
+
 function progressKey(userId, unitId) {
   return `${userId}:${unitId}`
 }
@@ -3053,6 +3222,71 @@ function publicProgress(progress) {
   }
 }
 
+function contentMetrics(content) {
+  const readingParagraphs = content?.reading?.paragraphs || []
+  const readingText = readingParagraphs.map((paragraph) => paragraph.text).join(' ')
+  return {
+    title: content?.title || '',
+    readingLevel: content?.level?.reading || '',
+    listeningLevel: content?.level?.listening || '',
+    readingWords: wordCount(readingText),
+    listeningWords: wordCount(content?.listening?.text || ''),
+    paragraphCount: readingParagraphs.length,
+    questionCount: content?.questions?.length || 0,
+  }
+}
+
+function buildVersionDiff(version, unit) {
+  const previous = version?.content
+  const current = unit?.content
+  if (!previous || !current) return null
+
+  const previousMetrics = contentMetrics(previous)
+  const currentMetrics = contentMetrics(current)
+  const previousParagraphs = previous.reading?.paragraphs || []
+  const currentParagraphs = current.reading?.paragraphs || []
+  const maxParagraphs = Math.max(previousParagraphs.length, currentParagraphs.length)
+  const paragraphDiffs = []
+  let changedParagraphs = 0
+
+  for (let index = 0; index < maxParagraphs; index += 1) {
+    const previousText = previousParagraphs[index]?.text || ''
+    const currentText = currentParagraphs[index]?.text || ''
+    const similarity = previousText && currentText ? textKeywordSimilarity(previousText, currentText) : previousText === currentText ? 1 : 0
+    const previousWords = wordCount(previousText)
+    const currentWords = wordCount(currentText)
+    const changed = normalizeClaimText(previousText) !== normalizeClaimText(currentText)
+    if (changed) changedParagraphs += 1
+    paragraphDiffs.push({
+      paragraph: index + 1,
+      changed,
+      similarity: Number(similarity.toFixed(2)),
+      wordDelta: currentWords - previousWords,
+      previousPreview: takeWords(previousText, 45),
+      currentPreview: takeWords(currentText, 45),
+    })
+  }
+
+  const previousScore = version.quality?.fidelity?.audit?.score
+  const currentScore = unit.quality?.fidelity?.audit?.score
+  return {
+    previous: previousMetrics,
+    current: currentMetrics,
+    summary: {
+      titleChanged: previousMetrics.title !== currentMetrics.title,
+      levelChanged:
+        previousMetrics.readingLevel !== currentMetrics.readingLevel || previousMetrics.listeningLevel !== currentMetrics.listeningLevel,
+      changedParagraphs,
+      wordDelta: currentMetrics.readingWords - previousMetrics.readingWords,
+      listeningWordDelta: currentMetrics.listeningWords - previousMetrics.listeningWords,
+      questionDelta: currentMetrics.questionCount - previousMetrics.questionCount,
+      fidelityScoreDelta:
+        previousScore !== undefined && currentScore !== undefined ? Number((Number(currentScore) - Number(previousScore)).toFixed(2)) : null,
+    },
+    paragraphDiffs,
+  }
+}
+
 function publicUnit(unit, db = null, userId = '') {
   if (!unit) return null
   const { sourceText, versions, ...safeUnit } = unit
@@ -3064,6 +3298,7 @@ function publicUnit(unit, db = null, userId = '') {
     generatedAt: version.generatedAt || '',
     level: version.level || null,
     quality: version.quality || null,
+    diff: buildVersionDiff(version, unit),
   }))
   if (db && userId) safeUnit.progress = publicProgress(getUnitProgress(db, userId, unit.id))
   return safeUnit
@@ -3424,6 +3659,16 @@ function keywordOverlapScore(readingText, sourceItem) {
   return overlap / Math.max(4, Math.min(readingKeywords.size, sourceItem.keywords.size))
 }
 
+function matchedKeywordsForSource(readingText, sourceItem, limit = 10) {
+  const readingKeywords = new Set(extractKeywords(readingText, 24))
+  if (!readingKeywords.size || !sourceItem?.keywords?.size) return []
+  const matched = []
+  for (const keyword of readingKeywords) {
+    if (sourceItem.keywords.has(keyword)) matched.push(keyword)
+  }
+  return matched.slice(0, limit)
+}
+
 function textKeywordSimilarity(a, b) {
   const left = new Set(extractKeywords(a, 24))
   const right = new Set(extractKeywords(b, 24))
@@ -3518,14 +3763,22 @@ function mapReadingToSource(content, unit) {
       readingParagraph: index + 1,
       status,
       confidence: Number(confidence.toFixed(2)),
+      generatedExcerpt: takeWords(paragraph.text || '', 90),
       suspiciousSentences,
       sourceRefs: ranked.map(({ source, score }) => ({
         id: `${unit.id}-map-${index + 1}-${source.index + 1}`,
         label: `${unit.sourceLocation}, 段落 ${source.index + 1}`,
-        excerpt: takeWords(source.text, 70),
+        sourceParagraphIndex: source.index + 1,
+        excerpt: takeWords(source.text, 110),
         wordCount: source.wordCount,
         keywordOverlap: Number(score.toFixed(2)),
+        matchedKeywords: matchedKeywordsForSource(paragraph.text || '', source),
       })),
+      coverageNote: ranked.length
+        ? confidence >= 0.25
+          ? '关键词覆盖较充分，适合快速核对。'
+          : '关键词有重合但不强，建议展开来源段落核对。'
+        : '未找到明显对应来源段落，建议用更忠实版本重生成。',
       note: ranked.length ? '按关键词重合度匹配的来源段落' : '未找到明显对应来源段落',
     }
     return output
@@ -3717,6 +3970,30 @@ function assessContentQuality(content, unit = null) {
     status: warnings.length ? 'review' : 'good',
     warnings,
   }
+}
+
+function isLowFidelityQuality(quality) {
+  const audit = quality?.fidelity?.audit
+  const score = audit?.score === undefined ? 1 : Number(audit.score)
+  const unsupportedCount = (audit?.unsupportedClaims || []).length
+  const suspiciousCount = (audit?.suspiciousSentences || []).length
+  const unmappedCount = (quality?.sourceMap || []).filter((item) => !item.sourceRefs?.length).length
+  return score < 0.6 || unsupportedCount > 0 || suspiciousCount > 1 || unmappedCount > 1
+}
+
+function fidelityRepairNotesFromQuality(quality) {
+  const audit = quality?.fidelity?.audit || {}
+  const notes = []
+  if (audit.score !== undefined) notes.push(`The failed draft received a fidelity score of ${audit.score}. Aim for a clearly higher score by staying closer to the source.`)
+  for (const claim of (audit.unsupportedClaims || []).slice(0, 5)) notes.push(`Remove or rewrite this unsupported claim unless it is directly in the source: ${claim}`)
+  for (const sentence of (audit.suspiciousSentences || []).slice(0, 5)) {
+    notes.push(`Check generated paragraph ${sentence.readingParagraph || '?'} carefully; suspicious sentence: ${sentence.sentence}`)
+  }
+  const missingKeywords = (quality?.fidelity?.missingKeywords || []).slice(0, 8)
+  if (missingKeywords.length) notes.push(`Preserve central source ideas when supported: ${missingKeywords.join(', ')}`)
+  const unmapped = (quality?.sourceMap || []).filter((item) => !item.sourceRefs?.length).map((item) => item.readingParagraph).slice(0, 5)
+  if (unmapped.length) notes.push(`Make reading paragraphs ${unmapped.join(', ')} directly traceable to the provided source.`)
+  return notes
 }
 
 function adaptiveSuggestion(report, settings) {
@@ -5218,6 +5495,7 @@ async function processJobQueue() {
           readingLevel: job.settings?.readingLevel || userSettings(db, user.id).readingLevel,
           listeningLevel: job.settings?.listeningLevel || userSettings(db, user.id).listeningLevel,
           fidelityMode: job.settings?.fidelityMode || '',
+          fidelityRepairNotes: job.settings?.fidelityRepairNotes || [],
         })
       } catch (error) {
         failure = error.message || '生成失败'
@@ -5300,6 +5578,31 @@ async function processJobQueue() {
       }
 
       const quality = assessContentQuality(content, unit)
+      const retryCount = Number(job.retryCount || 0)
+      const shouldRetryForFidelity = isLowFidelityQuality(quality) && job.settings?.fidelityMode !== 'strict' && retryCount < maxAutoRegenAttempts
+      if (shouldRetryForFidelity) {
+        job.settings = {
+          ...(job.settings || {}),
+          fidelityMode: 'strict',
+          fidelityRepairNotes: fidelityRepairNotesFromQuality(quality),
+        }
+        job.force = Boolean(unit.content)
+        job.status = 'queued'
+        job.progress = 0
+        job.retryCount = retryCount + 1
+        job.qualityStatus = 'strict-fidelity-auto-retry'
+        job.message = `忠实度审稿偏低，正在自动生成更忠实版本 ${job.retryCount}/${maxAutoRegenAttempts}`
+        job.updatedAt = new Date().toISOString()
+        unit.generation = {
+          ...(unit.generation || {}),
+          jobId: job.id,
+          status: 'queued',
+          progress: 0,
+          message: job.message,
+        }
+        await writeDb(db)
+        continue
+      }
       if (quality.status === 'review' && Number(job.retryCount || 0) < maxAutoRegenAttempts) {
         job.status = 'queued'
         job.progress = 0
@@ -5691,7 +5994,7 @@ async function createApp() {
       }
       await writeDb(db)
 
-      res.json({ book: summarizeBook(book, units), units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
+      res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) }, units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
     } catch (error) {
       next(error)
     }
@@ -5705,7 +6008,7 @@ async function createApp() {
       return
     }
     const units = db.units.filter((unit) => unit.bookId === book.id)
-    res.json({ book: summarizeBook(book, units), units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
+    res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) }, units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
   })
 
   app.patch('/api/books/:bookId', auth, async (req, res) => {
@@ -5733,7 +6036,7 @@ async function createApp() {
     }
     await writeDb(db)
     const units = db.units.filter((unit) => unit.bookId === book.id)
-    res.json({ book: summarizeBook(book, units) })
+    res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) } })
   })
 
   app.delete('/api/books/:bookId', auth, async (req, res, next) => {
@@ -5821,7 +6124,7 @@ async function createApp() {
     setTimeout(processJobQueue, 0)
     const units = db.units.filter((unit) => unit.bookId === book.id)
     res.json({
-      book: summarizeBook(book, units),
+      book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) },
       units: units.map((unit) => publicUnit(unit, db, req.user.id)),
       jobs: jobs.map(publicJob),
       enqueued: jobs.length,

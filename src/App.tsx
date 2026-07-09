@@ -7,9 +7,11 @@ import {
   BookMarked,
   BookOpen,
   Brain,
+  Building2,
   Check,
   ChevronDown,
   Clock,
+  Diff,
   Download,
   FileText,
   Flame,
@@ -18,6 +20,7 @@ import {
   ListChecks,
   Loader2,
   LogOut,
+  MapPin,
   Pause,
   Pencil,
   Play,
@@ -25,6 +28,7 @@ import {
   Server,
   ShieldCheck,
   Settings,
+  Tags,
   TrendingUp,
   Trash2,
   Upload,
@@ -70,6 +74,31 @@ type Book = {
   generatedUnits: number
   completedUnits: number
   createdAt: string
+  glossary?: BookGlossary
+}
+
+type BookGlossary = {
+  bookId: string
+  itemCount: number
+  generatedUnitCount: number
+  sourceUnitCount: number
+  items: BookGlossaryItem[]
+}
+
+type BookGlossaryItem = {
+  id: string
+  term: string
+  category: 'concept' | 'person' | 'place' | 'institution' | 'term'
+  categoryLabel: string
+  meaningZh?: string
+  simpleEnglish?: string
+  occurrenceCount: number
+  unitCount: number
+  sources: Array<{
+    unitId: string
+    unitTitle: string
+    sourceLocation: string
+  }>
 }
 
 type Concept = {
@@ -154,6 +183,8 @@ type Unit = {
       readingParagraph: number
       status?: 'ok' | 'review'
       confidence?: number
+      generatedExcerpt?: string
+      coverageNote?: string
       suspiciousSentences?: Array<{
         sentence: string
         reason: string
@@ -163,9 +194,11 @@ type Unit = {
       sourceRefs: Array<{
         id: string
         label: string
+        sourceParagraphIndex?: number
         excerpt: string
         wordCount: number
         keywordOverlap?: number
+        matchedKeywords?: string[]
       }>
       note?: string
     }>
@@ -218,9 +251,42 @@ type Unit = {
       listening: string
     } | null
     quality?: Unit['quality'] | null
+    diff?: UnitVersionDiff | null
   }>
   createdAt: string
   generatedAt: string | null
+}
+
+type UnitVersionDiff = {
+  previous: VersionMetrics
+  current: VersionMetrics
+  summary: {
+    titleChanged: boolean
+    levelChanged: boolean
+    changedParagraphs: number
+    wordDelta: number
+    listeningWordDelta: number
+    questionDelta: number
+    fidelityScoreDelta: number | null
+  }
+  paragraphDiffs: Array<{
+    paragraph: number
+    changed: boolean
+    similarity: number
+    wordDelta: number
+    previousPreview: string
+    currentPreview: string
+  }>
+}
+
+type VersionMetrics = {
+  title: string
+  readingLevel: string
+  listeningLevel: string
+  readingWords: number
+  listeningWords: number
+  paragraphCount: number
+  questionCount: number
 }
 
 type UnitProgress = {
@@ -820,6 +886,75 @@ function suspiciousMatch(sentence: string, sourceMapItem?: NonNullable<NonNullab
     const suspect = normalizeSentenceKey(item.sentence)
     return Boolean(suspect && (normalized.includes(suspect) || suspect.includes(normalized) || normalized.split(' ').filter((word) => suspect.includes(word) && word.length > 4).length >= 3))
   })
+}
+
+function formatSigned(value: number) {
+  if (!value) return '0'
+  return value > 0 ? `+${value}` : String(value)
+}
+
+function versionReasonLabel(reason: string) {
+  const labels: Record<string, string> = {
+    regenerated: '重生成前版本',
+    'fidelity-regenerated': '忠实重生成前版本',
+    'paragraph-repair': '段落修复前版本',
+    'restore-point': '恢复前版本',
+  }
+  return labels[reason] || reason || '历史版本'
+}
+
+function glossaryIcon(category: BookGlossaryItem['category']) {
+  if (category === 'person') return User
+  if (category === 'place') return MapPin
+  if (category === 'institution') return Building2
+  if (category === 'concept') return Brain
+  return Tags
+}
+
+type SourceMapItem = NonNullable<NonNullable<Unit['quality']>['sourceMap']>[number]
+
+function SourceMapDetail({ item, generatedText }: { item: SourceMapItem; generatedText?: string }) {
+  const generated = generatedText || item.generatedExcerpt || ''
+  return (
+    <div className="source-map-detail">
+      {generated && (
+        <div className="source-compare-grid">
+          <div className="source-compare-pane generated">
+            <span>生成段落</span>
+            <p>{generated}</p>
+          </div>
+          <div className="source-compare-pane source">
+            <span>最相关来源</span>
+            {item.sourceRefs.length ? (
+              item.sourceRefs.map((ref) => (
+                <div key={ref.id} className="source-ref-block">
+                  <strong>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}</strong>
+                  <p>{ref.excerpt}</p>
+                  {(ref.matchedKeywords || []).length > 0 && (
+                    <div className="keyword-chip-row">
+                      {(ref.matchedKeywords || []).map((keyword) => (
+                        <span key={`${ref.id}-${keyword}`}>{keyword}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))
+            ) : (
+              <p>{item.note || '未找到明显对应来源段落'}</p>
+            )}
+          </div>
+        </div>
+      )}
+      {item.coverageNote && <p className="coverage-note">{item.coverageNote}</p>}
+      {(item.suspiciousSentences || []).length > 0 && (
+        <div className="suspicious-list">
+          {(item.suspiciousSentences || []).map((sentence, index) => (
+            <p key={`${sentence.sentence}-${index}`}>可疑句子：{sentence.sentence}（{sentence.reason}）</p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function delay(ms: number) {
@@ -2415,6 +2550,11 @@ function BookView({
   const allPodcastEstimate = selectedPodcastKind === 'topic'
     ? '全书专题只保留 1 集。'
     : `预计还剩约 ${estimatedPodcastRemaining || estimatedPodcastTotal} 集，会按队列逐集生成。`
+  const glossaryItems = book.glossary?.items || []
+  const glossaryCounts = glossaryItems.reduce<Record<string, number>>((counts, item) => {
+    counts[item.categoryLabel || item.category] = (counts[item.categoryLabel || item.category] || 0) + 1
+    return counts
+  }, {})
 
   return (
     <section className="page-section">
@@ -2478,6 +2618,44 @@ function BookView({
         <Stat label="已完成" value={String(book.completedUnits)} />
         <Stat label="词数" value={formatNumber(book.wordCount)} />
       </div>
+
+      {glossaryItems.length > 0 && (
+        <details className="book-glossary">
+          <summary>
+            <span>
+              <Tags size={18} />
+              术语与人名地名表
+            </span>
+            <small>
+              {book.glossary?.itemCount || glossaryItems.length} 项 · {Object.entries(glossaryCounts).map(([label, count]) => `${label} ${count}`).join(' · ')}
+            </small>
+          </summary>
+          <div className="glossary-grid">
+            {glossaryItems.slice(0, 48).map((item) => {
+              const Icon = glossaryIcon(item.category)
+              return (
+                <article key={item.id} className={`glossary-item ${item.category}`}>
+                  <div className="glossary-title">
+                    <Icon size={16} />
+                    <strong>{item.term}</strong>
+                    <span>{item.categoryLabel}</span>
+                  </div>
+                  {(item.simpleEnglish || item.meaningZh) && (
+                    <p>{item.simpleEnglish || item.meaningZh}</p>
+                  )}
+                  <div className="glossary-meta">
+                    <span>出现 {item.occurrenceCount} 次</span>
+                    <span>涉及 {item.unitCount} 个单元</span>
+                  </div>
+                  {item.sources.length > 0 && (
+                    <small>{item.sources.map((source) => source.sourceLocation || source.unitTitle).join('；')}</small>
+                  )}
+                </article>
+              )
+            })}
+          </div>
+        </details>
+      )}
 
       <div className="unit-toolbar">
         <div className="unit-difficulty-controls">
@@ -3212,20 +3390,7 @@ function StudyView({
                         </button>
                       )}
                     </div>
-                    {item.sourceRefs.length ? (
-                      item.sourceRefs.map((ref) => (
-                        <p key={ref.id}>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}：{ref.excerpt}</p>
-                      ))
-                    ) : (
-                      <p>{item.note || '未找到明显对应来源段落'}</p>
-                    )}
-                    {(item.suspiciousSentences || []).length > 0 && (
-                      <div className="suspicious-list">
-                        {(item.suspiciousSentences || []).map((sentence, index) => (
-                          <p key={`${sentence.sentence}-${index}`}>可疑句子：{sentence.sentence}（{sentence.reason}）</p>
-                        ))}
-                      </div>
-                    )}
+                    <SourceMapDetail item={item} generatedText={content.reading.paragraphs[item.readingParagraph - 1]?.text} />
                   </div>
                 ))}
               </details>
@@ -3236,12 +3401,40 @@ function StudyView({
                 <div className="version-list">
                   {(unit.versions || []).slice().reverse().map((version) => (
                     <div key={version.id} className="version-item">
-                      <div>
-                        <strong>{version.title}</strong>
+                      <div className="version-main">
+                        <div className="version-title-line">
+                          <strong>{version.title}</strong>
+                          <span className="status-pill queued">{versionReasonLabel(version.reason)}</span>
+                        </div>
                         <span>
                           {version.savedAt ? new Date(version.savedAt).toLocaleString() : '历史版本'}
                           {version.level ? ` · 阅读 ${version.level.reading} · 听力 ${version.level.listening}` : ''}
+                          {version.quality?.fidelity?.audit?.score !== undefined ? ` · 原忠实度 ${formatPercent(version.quality.fidelity.audit.score)}` : ''}
                         </span>
+                        {version.diff && (
+                          <details className="version-diff">
+                            <summary>
+                              <Diff size={15} />
+                              差异：改动 {version.diff.summary.changedParagraphs} 段 · 阅读 {formatSigned(version.diff.summary.wordDelta)} 词 · 听力 {formatSigned(version.diff.summary.listeningWordDelta)} 词
+                              {version.diff.summary.fidelityScoreDelta !== null ? ` · 忠实度 ${formatSigned(Math.round(version.diff.summary.fidelityScoreDelta * 100))}%` : ''}
+                            </summary>
+                            <div className="version-diff-grid">
+                              <span>旧版阅读 {version.diff.previous.readingWords} 词</span>
+                              <span>当前阅读 {version.diff.current.readingWords} 词</span>
+                              <span>题目 {formatSigned(version.diff.summary.questionDelta)}</span>
+                              <span>{version.diff.summary.levelChanged ? '难度有变化' : '难度未变'}</span>
+                            </div>
+                            <div className="version-paragraph-diffs">
+                              {version.diff.paragraphDiffs.filter((item) => item.changed).slice(0, 5).map((item) => (
+                                <div key={`${version.id}-${item.paragraph}`}>
+                                  <strong>第 {item.paragraph} 段 · 相似度 {formatPercent(item.similarity)} · {formatSigned(item.wordDelta)} 词</strong>
+                                  <p>旧：{item.previousPreview || '无'}</p>
+                                  <p>新：{item.currentPreview || '无'}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        )}
                       </div>
                       <button type="button" onClick={() => restoreVersion(version.id)} disabled={restoringVersionId === version.id}>
                         {restoringVersionId === version.id ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
@@ -3346,16 +3539,7 @@ function StudyView({
                       来源映射 · {sourceMapItem.status === 'review' ? '需复核' : '已匹配'}
                       {sourceMapItem.confidence !== undefined ? ` · ${formatPercent(sourceMapItem.confidence || 0)}` : ''}
                     </summary>
-                    {sourceMapItem.sourceRefs.length ? (
-                      sourceMapItem.sourceRefs.map((ref) => (
-                        <p key={ref.id}>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}：{ref.excerpt}</p>
-                      ))
-                    ) : (
-                      <p>{sourceMapItem.note || '未找到明显对应来源段落'}</p>
-                    )}
-                    {(sourceMapItem.suspiciousSentences || []).map((item, index) => (
-                      <p key={`${item.sentence}-${index}`} className="suspicious-note">可疑句子：{item.sentence}（{item.reason}）</p>
-                    ))}
+                    <SourceMapDetail item={sourceMapItem} generatedText={paragraph.text} />
                   </details>
                 )}
               </article>

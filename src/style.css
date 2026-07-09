@@ -876,6 +876,91 @@ p {
   font-size: 1.38rem;
 }
 
+.book-glossary {
+  margin: -4px 0 20px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.book-glossary summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.book-glossary summary span,
+.glossary-title,
+.glossary-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.book-glossary summary > span {
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.book-glossary summary small,
+.glossary-item small,
+.glossary-meta {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.glossary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.glossary-item {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fbfcfb;
+  display: grid;
+  gap: 8px;
+}
+
+.glossary-title strong {
+  overflow-wrap: anywhere;
+}
+
+.glossary-title span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-2);
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.glossary-item.person .glossary-title span,
+.glossary-item.place .glossary-title span {
+  color: var(--green);
+  background: var(--green-2);
+}
+
+.glossary-item.institution .glossary-title span {
+  color: var(--rust);
+  background: var(--rust-2);
+}
+
+.glossary-item p {
+  color: var(--ink);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
 .dashboard-page {
   display: grid;
   gap: 18px;
@@ -1589,6 +1674,75 @@ p {
   color: var(--rust);
 }
 
+.source-map-detail {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.source-compare-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.source-compare-pane {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: #ffffff;
+}
+
+.source-compare-pane > span,
+.source-ref-block strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 780;
+}
+
+.source-compare-pane p,
+.source-ref-block p,
+.coverage-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.source-compare-pane.generated {
+  border-color: color-mix(in srgb, var(--blue) 20%, var(--line-soft));
+  background: color-mix(in srgb, var(--blue-2) 28%, #ffffff);
+}
+
+.source-ref-block + .source-ref-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.keyword-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.keyword-chip-row span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--green);
+  background: var(--green-2);
+  font-size: 0.76rem;
+  font-weight: 720;
+}
+
+.coverage-note {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
 .listen-state {
   color: var(--muted);
   font-size: 0.92rem;
@@ -1837,14 +1991,22 @@ p {
 
 .version-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.version-item div {
+.version-main {
+  min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 6px;
+}
+
+.version-title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .version-item span {
@@ -1862,6 +2024,57 @@ p {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.version-diff {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.version-diff summary {
+  cursor: pointer;
+  color: var(--blue);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  font-weight: 760;
+}
+
+.version-diff-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.version-diff-grid span {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.version-paragraph-diffs {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.version-paragraph-diffs div {
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.version-paragraph-diffs p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 
 .settings-section {
@@ -2354,6 +2567,15 @@ p {
     flex-direction: column;
   }
 
+  .book-glossary summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .glossary-grid {
+    grid-template-columns: 1fr;
+  }
+
   .toolbar-inline,
   .unit-actions,
   .review-actions,
@@ -2468,6 +2690,14 @@ p {
 
   .podcast-row {
     grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .source-compare-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .version-item {
+    display: grid;
   }
 
   .unit-row .status-pill,
