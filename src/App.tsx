@@ -55,6 +55,7 @@ type UserSettings = {
   studyMinutes: number
   chineseAssist: string
   aiSuggestions: boolean
+  focusStudyMode?: boolean
   keepSourceFiles: boolean
   podcastLexile: number
   podcastVoice: string
@@ -1351,6 +1352,7 @@ export function App() {
         {view === 'study' && selectedUnit && (
           <StudyView
             unit={selectedUnit}
+            settings={data.settings}
             token={token}
             onBack={() => (selectedBook ? setView('book') : setView('home'))}
             onCompleted={(report) => {
@@ -2862,6 +2864,7 @@ function BookView({
 
 function StudyView({
   unit,
+  settings,
   token,
   onBack,
   onCompleted,
@@ -2872,6 +2875,7 @@ function StudyView({
   onError,
 }: {
   unit: Unit
+  settings: UserSettings
   token: string
   onBack: () => void
   onCompleted: (report: Report) => void
@@ -2895,6 +2899,7 @@ function StudyView({
   const [regeneratingFaithful, setRegeneratingFaithful] = useState(false)
   const [repairingParagraphs, setRepairingParagraphs] = useState(false)
   const [showQualityIssues, setShowQualityIssues] = useState(false)
+  const [studyMode, setStudyMode] = useState<'learn' | 'review'>(settings.focusStudyMode === false ? 'review' : 'learn')
   const [dynamicDefinitions, setDynamicDefinitions] = useState<Record<string, VocabularyItem>>({})
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
@@ -2911,13 +2916,15 @@ function StudyView({
   const lowQualityParagraphNumbers = lowQualitySourceMapItems.map((item) => Number(item.readingParagraph || 0)).filter(Boolean)
   const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length || lowQualitySourceMapItems.length)
   const latestVersion = (unit.versions || [])[unit.versions?.length ? unit.versions.length - 1 : -1]
+  const reviewMode = studyMode === 'review'
 
   useEffect(() => {
     setAnswers(unit.progress?.answers || {})
     setListeningCompleted(Boolean(unit.progress?.listeningCompleted))
     setCurrentParagraph(Number(unit.progress?.paragraphIndex || 0))
     setShowQualityIssues(false)
-  }, [unit.id, unit.progress?.updatedAt])
+    setStudyMode(settings.focusStudyMode === false ? 'review' : 'learn')
+  }, [unit.id, unit.progress?.updatedAt, settings.focusStudyMode])
 
   useEffect(() => {
     if (!content || currentParagraph <= 0) return
@@ -3228,6 +3235,7 @@ function StudyView({
   }
 
   function revealQualityIssues() {
+    setStudyMode('review')
     setShowQualityIssues(true)
     window.setTimeout(() => qualityIssuesRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50)
   }
@@ -3288,18 +3296,39 @@ function StudyView({
             <h1>{content.title}</h1>
             <p>{content.sourceLocation}</p>
           </div>
+          <div className="study-mode-switch">
+            <Segmented
+              ariaLabel="学习页模式"
+              options={['学习模式', '审稿模式']}
+              value={reviewMode ? '审稿模式' : '学习模式'}
+              onChange={(value) => {
+                setStudyMode(value === '审稿模式' ? 'review' : 'learn')
+                if (value === '学习模式') setShowQualityIssues(false)
+              }}
+            />
+          </div>
         </div>
 
-        <details className="source-box">
-          <summary>
-            <ChevronDown size={18} />
-            查看来源
-          </summary>
-          <p>{unit.sourceExcerpt}</p>
-        </details>
+        {!reviewMode && needsFidelityReview && (
+          <div className="focus-quality-notice">
+            <ShieldCheck size={17} />
+            <span>这个单元有质量复核提示。你可以先继续学习，或切换到审稿模式查看细节。</span>
+            <button type="button" onClick={revealQualityIssues}>查看</button>
+          </div>
+        )}
 
-        {unit.quality && (
-          <details className="source-box quality-box" open={needsFidelityReview}>
+        {reviewMode && (
+          <details className="source-box">
+            <summary>
+              <ChevronDown size={18} />
+              查看来源
+            </summary>
+            <p>{unit.sourceExcerpt}</p>
+          </details>
+        )}
+
+        {reviewMode && unit.quality && (
+          <details className="source-box quality-box" open={needsFidelityReview || showQualityIssues}>
             <summary>
               <ChevronDown size={18} />
               生成质量
@@ -3489,7 +3518,7 @@ function StudyView({
           </div>
           {content.reading.paragraphs.map((paragraph, paragraphIndex) => {
             const sourceMapItem = sourceMapForParagraph(unit, paragraphIndex)
-            const needsParagraphReview = sourceMapItem?.status === 'review'
+            const needsParagraphReview = reviewMode && sourceMapItem?.status === 'review'
             return (
               <article
                 key={`${paragraph.text}-${paragraphIndex}`}
@@ -3498,7 +3527,7 @@ function StudyView({
               >
                 <p>
                   {splitSentences(paragraph.text).map((sentence, sentenceIndex) => {
-                    const suspicious = suspiciousMatch(sentence, sourceMapItem)
+                    const suspicious = reviewMode ? suspiciousMatch(sentence, sourceMapItem) : undefined
                     return (
                       <span
                         key={`${sentence}-${sentenceIndex}`}
@@ -3527,13 +3556,13 @@ function StudyView({
                 <button className="summary-button progress-button" type="button" onClick={() => markParagraph(paragraphIndex)}>
                   读到这里
                 </button>
-                {needsParagraphReview && (
+                {reviewMode && needsParagraphReview && (
                   <button className="summary-button repair-button" type="button" onClick={() => repairQualityParagraphs([paragraphIndex + 1])} disabled={repairingParagraphs}>
                     {repairingParagraphs ? '修复中' : '修复本段'}
                   </button>
                 )}
                 {showSummaries[paragraphIndex] && <div className="summary-text">{paragraph.summaryZh}</div>}
-                {sourceMapItem && (
+                {reviewMode && sourceMapItem && (
                   <details className="paragraph-source-map" open={needsParagraphReview}>
                     <summary>
                       来源映射 · {sourceMapItem.status === 'review' ? '需复核' : '已匹配'}
@@ -4484,6 +4513,10 @@ function SettingsView({
   const [changingPassword, setChangingPassword] = useState(false)
 
   useEffect(() => {
+    setDraft(settings)
+  }, [settings])
+
+  useEffect(() => {
     requestJson<SecurityStatus>('/api/security/status', token)
       .then(setSecurity)
       .catch(() => undefined)
@@ -4585,6 +4618,17 @@ function SettingsView({
             onChange={(event) => setDraft({ ...draft, aiSuggestions: event.target.checked })}
           />
           <span>开启</span>
+        </label>
+      </SettingGroup>
+
+      <SettingGroup title="专注学习模式">
+        <label className="toggle-line">
+          <input
+            type="checkbox"
+            checked={draft.focusStudyMode !== false}
+            onChange={(event) => setDraft({ ...draft, focusStudyMode: event.target.checked })}
+          />
+          <span>默认隐藏审稿信息</span>
         </label>
       </SettingGroup>
 

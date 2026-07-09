@@ -581,12 +581,14 @@ function userSettings(db, userId) {
       studyMinutes: 10,
       chineseAssist: 'click',
       aiSuggestions: true,
+      focusStudyMode: true,
       keepSourceFiles: true,
       podcastLexile: podcastLexileDefault,
       podcastVoice: process.env.GEMINI_TTS_VOICE || 'Kore',
     }
     db.settings.push(settings)
   }
+  if (settings.focusStudyMode === undefined) settings.focusStudyMode = true
   if (!settings.podcastLexile) settings.podcastLexile = podcastLexileDefault
   if (!settings.podcastVoice) settings.podcastVoice = process.env.GEMINI_TTS_VOICE || 'Kore'
   settings.readingLevel = normalizeLevel(readingLevels, settings.readingLevel, 'A2+')
@@ -5897,7 +5899,7 @@ async function createApp() {
   app.patch('/api/settings', auth, async (req, res) => {
     const db = req.db
     const settings = userSettings(db, req.user.id)
-    const allowed = ['readingLevel', 'listeningLevel', 'studyMinutes', 'chineseAssist', 'aiSuggestions', 'keepSourceFiles', 'podcastLexile', 'podcastVoice']
+    const allowed = ['readingLevel', 'listeningLevel', 'studyMinutes', 'chineseAssist', 'aiSuggestions', 'focusStudyMode', 'keepSourceFiles', 'podcastLexile', 'podcastVoice']
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) settings[key] = req.body[key]
     }

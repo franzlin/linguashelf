@@ -247,6 +247,15 @@ p {
   color: var(--soft-muted);
 }
 
+.study-mode-switch {
+  flex: 0 0 auto;
+}
+
+.study-mode-switch .segmented {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+}
+
 .book-title-line,
 .book-title-edit {
   display: flex;
@@ -1514,6 +1523,41 @@ p {
   background: var(--surface-2);
 }
 
+.focus-quality-notice {
+  min-height: 42px;
+  margin: -6px 0 18px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--rust) 18%, var(--line-soft));
+  border-radius: 8px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--rust-2) 30%, #ffffff);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.focus-quality-notice svg {
+  flex: 0 0 auto;
+  color: var(--rust);
+}
+
+.focus-quality-notice span {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.focus-quality-notice button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--rust);
+  background: var(--rust-2);
+  font-weight: 760;
+}
+
 .concept-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -2551,6 +2595,15 @@ p {
   .setting-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .study-mode-switch,
+  .study-mode-switch .segmented {
+    width: 100%;
+  }
+
+  .focus-quality-notice {
+    align-items: flex-start;
   }
 
   .upload-actions {
