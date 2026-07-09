@@ -205,6 +205,39 @@ try {
   await page.getByRole('heading', { name: '听力预热' }).waitFor()
   await page.screenshot({ path: path.join(screenshotDir, 'study-generated.png'), fullPage: true })
 
+  await page.getByLabel('主导航').getByRole('button', { name: '轻练' }).click()
+  await page.getByRole('heading', { name: '每日轻练' }).waitFor()
+  await page.getByRole('button', { name: '短文阅读' }).click()
+  await page.getByRole('button', { name: '开始新轻练' }).click()
+  await page.getByRole('heading', { name: 'Short Reading Practice' }).waitFor({ timeout: 15000 })
+  const microQuestions = page.locator('.micro-practice-card .question-item')
+  const microQuestionCount = await microQuestions.count()
+  if (microQuestionCount < 2) {
+    throw new Error(`Expected at least 2 micro-practice questions, found ${microQuestionCount}`)
+  }
+  for (let index = 0; index < microQuestionCount; index += 1) {
+    await microQuestions.nth(index).locator('.options-grid button').first().click()
+  }
+  const microCompleteResponsePromise = page.waitForResponse((response) => response.url().includes('/api/micro-practices/') && response.url().includes('/complete'))
+  await page.getByRole('button', { name: '提交答案' }).click()
+  const microCompleteResponse = await microCompleteResponsePromise
+  if (!microCompleteResponse.ok()) {
+    throw new Error(`Micro practice complete failed with HTTP ${microCompleteResponse.status()}: ${await microCompleteResponse.text()}`)
+  }
+  const microCompletePayload = await microCompleteResponse.json()
+  if (!microCompletePayload.attempt || !microCompletePayload.practice) {
+    throw new Error(`Micro practice complete returned unexpected payload: ${JSON.stringify(microCompletePayload)}`)
+  }
+  await page.waitForTimeout(750)
+  if (!(await page.locator('.completion-overlay').count())) {
+    const bodyText = (await page.locator('body').innerText()).slice(0, 2000)
+    throw new Error(`Micro practice completion overlay did not appear. Page text:\n${bodyText}`)
+  }
+  await page.locator('.completion-overlay').getByRole('heading', { name: /正确/ }).waitFor()
+  await page.getByText('关联生词').waitFor()
+  await page.screenshot({ path: path.join(screenshotDir, 'micro-practice-completed.png'), fullPage: true })
+  await page.getByRole('button', { name: '查看详情' }).click()
+
   insertFailedPodcastTask()
   await page.getByLabel('主导航').getByRole('button', { name: '任务' }).click()
   await page.locator('h1').filter({ hasText: '任务' }).waitFor()

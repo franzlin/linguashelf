@@ -37,7 +37,7 @@ import {
   X,
 } from 'lucide-react'
 
-type View = 'home' | 'library' | 'book' | 'study' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'admin' | 'settings'
+type View = 'home' | 'library' | 'book' | 'study' | 'micro' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'admin' | 'settings'
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
 type UserProfile = {
@@ -59,6 +59,12 @@ type UserSettings = {
   keepSourceFiles: boolean
   podcastLexile: number
   podcastVoice: string
+  microPracticeType: MicroPracticeType
+  microPracticeTopic: MicroPracticeTopic
+  microPracticeDifficulty: string
+  microPracticeDailyGoal: number
+  microPracticeMonthlyGoal: number
+  microPracticeCustomTopic?: string
   lastLevelAdjustedAt?: string
   lastLevelCheckReportId?: string
 }
@@ -128,6 +134,64 @@ type Question = {
   options: string[]
   answerIndex: number
   explanationZh: string
+  relatedTerms?: string[]
+}
+
+type MicroPracticeType = 'reading' | 'listening' | 'random'
+type MicroPracticeTopic = 'book' | 'weak-vocabulary' | 'history' | 'politics' | 'economics' | 'technology' | 'random' | 'custom'
+
+type MicroPractice = {
+  id: string
+  type: 'reading' | 'listening'
+  typeLabel: string
+  topic: MicroPracticeTopic
+  topicLabel: string
+  difficulty: string
+  sourceMode: 'book' | 'vocabulary' | 'general' | 'custom' | string
+  sourceBookId?: string
+  sourceBookTitle?: string
+  sourceSummary: string
+  keyTerms: string[]
+  content: {
+    title: string
+    body: string
+    transcriptHiddenByDefault: boolean
+    sourceSummary: string
+    concepts: Concept[]
+    vocabulary: VocabularyItem[]
+    questions: Question[]
+  }
+  audio?: {
+    model?: string
+    voice?: string
+    format?: string
+    generatedAt?: string
+  } | null
+  status: 'ready' | 'completed'
+  generatedBy?: string
+  completedAt?: string
+  createdAt: string
+}
+
+type MicroAttempt = {
+  id: string
+  practiceId: string
+  type: 'reading' | 'listening'
+  topicLabel: string
+  difficulty: string
+  correctCount: number
+  questionCount: number
+  correctRate: number
+  studyMinutes: number
+  savedVocabularyCount: number
+  wrongQuestions?: Array<{
+    id: string
+    prompt: string
+    explanationZh: string
+    relatedTerms?: string[]
+  }>
+  suggestion?: string
+  createdAt: string
 }
 
 type ReadingParagraph = {
@@ -426,28 +490,45 @@ type AppData = {
   books: Book[]
   vocabulary: VocabularyItem[]
   reports: Report[]
+  micro: {
+    recentPractices: MicroPractice[]
+    recentAttempts: MicroAttempt[]
+  }
   stats: {
     completedUnits: number
+    microPracticeCount: number
+    microMonthPractices: number
     averageCorrectRate: number
+    microCorrectRate: number
     vocabularyCount: number
     dueVocabulary: number
     masteredVocabulary: number
     readingMinutes: number
+    microPracticeMinutes: number
+    studyMinutesTotal: number
     todayReadingMinutes: number
+    todayStudyMinutes: number
     weeklyReadingMinutes: number
+    weeklyStudyMinutes: number
     recentReports: Array<{
       date: string
       correctRate: number
       words: number
     }>
     todayCompleted: number
+    todayMicroPractices: number
     dailyGoalUnits: number
     dailyGoalMinutes: number
+    microDailyGoal: number
+    microMonthlyGoal: number
+    microTodayGoalMet: boolean
+    microMonthGoalMet: boolean
     todayGoalMet: boolean
     streakDays: number
     calendar: Array<{
       date: string
       units: number
+      microPractices: number
       words: number
       correctRate: number
       minutes: number
@@ -455,10 +536,12 @@ type AppData = {
     activity: Array<{
       date: string
       units: number
+      microPractices: number
       words: number
       correctRate: number
       minutes: number
     }>
+    recentMicroPractices: MicroAttempt[]
     vocabularyGrowth: {
       total: number
       addedThisWeek: number
@@ -714,6 +797,22 @@ type BeforeInstallPromptEvent = Event & {
 
 const readingLevelOptions = ['A2', 'A2+', 'B1', 'B1+', 'B2']
 const listeningLevelOptions = ['A1', 'A1+', 'A2', 'A2+', 'B1', 'B1+', 'B2']
+const microPracticeTypeOptions: Array<{ value: MicroPracticeType; label: string }> = [
+  { value: 'random', label: '随机' },
+  { value: 'reading', label: '短文阅读' },
+  { value: 'listening', label: '听力轻练' },
+]
+const microPracticeTopicOptions: Array<{ value: MicroPracticeTopic; label: string }> = [
+  { value: 'book', label: '最近书籍' },
+  { value: 'weak-vocabulary', label: '薄弱生词' },
+  { value: 'history', label: '历史' },
+  { value: 'politics', label: '政治' },
+  { value: 'economics', label: '经济' },
+  { value: 'technology', label: '科技' },
+  { value: 'random', label: '随机主题' },
+  { value: 'custom', label: '自定义' },
+]
+const microDifficultyOptions = ['A1', 'A1+', 'A2', 'A2+', 'B1', 'B1+', 'B2']
 const podcastLexileOptions = ['500', '600', '700', '800', '900', '1000', '1100', '1200', '1300', '1400', '1500']
 const podcastKindOrder: PodcastKind[] = ['preview', 'review', 'topic', 'walkthrough']
 const podcastKindLabels: Record<PodcastKind, string> = {
@@ -1008,7 +1107,7 @@ export function App() {
 
   async function refresh(activeToken = token) {
     if (!activeToken) return
-    setLoading(true)
+    if (!data) setLoading(true)
     try {
       const next = await requestJson<AppData>('/api/app', activeToken)
       setData(next)
@@ -1368,6 +1467,21 @@ export function App() {
           />
         )}
 
+        {view === 'micro' && (
+          <MicroPracticeView
+            token={token}
+            settings={data.settings}
+            stats={data.stats}
+            books={data.books}
+            initialPractices={data.micro?.recentPractices || []}
+            initialAttempts={data.micro?.recentAttempts || []}
+            onChanged={() => refresh()}
+            onOpenBook={openBook}
+            onNavigate={setView}
+            onError={setError}
+          />
+        )}
+
         {view === 'reports' && (
           <ReportsView
             reports={latestReport ? [latestReport, ...data.reports.filter((item) => item.id !== latestReport.id)] : data.reports}
@@ -1527,6 +1641,7 @@ function HomeView({
 
         <div className="stat-row">
           <Stat label="完成单元" value={String(data.stats.completedUnits)} />
+          <Stat label="每日轻练" value={String(data.stats.microPracticeCount || 0)} />
           <Stat label="平均正确率" value={formatPercent(data.stats.averageCorrectRate)} />
           <Stat label="到期生词" value={String(data.stats.dueVocabulary)} />
           <Stat label="连续学习" value={`${data.stats.streakDays || 0} 天`} />
@@ -1541,6 +1656,18 @@ function HomeView({
             </div>
             <button className="ghost-button" type="button" onClick={() => onNavigate(recommendation?.view || 'home')}>
               {recommendation?.actionLabel || '开始'}
+            </button>
+          </article>
+          <article className="insight-card">
+            <div>
+              <span className="eyebrow">每日轻练</span>
+              <h2>
+                今日 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal || 1} 次
+              </h2>
+              <p>{data.stats.microTodayGoalMet ? '轻练目标已完成。' : '时间紧的时候，做一轮短练习保持手感。'}</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => onNavigate('micro')}>
+              开始轻练
             </button>
           </article>
           <article className="insight-card">
@@ -1620,14 +1747,15 @@ function HomeView({
         <section className="page-section compact-section">
           <h2>学习节奏</h2>
           <p>今日 {data.stats.todayCompleted || 0}/{data.stats.dailyGoalUnits || 1} 单元</p>
+          <p>轻练 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal || 1} 次</p>
           <p>{data.settings.studyMinutes} 分钟 / 单元</p>
           {data.home.latestReport && <p>上次正确率 {formatPercent(data.home.latestReport.correctRate)}</p>}
           <div className="calendar-strip">
             {(data.stats.calendar || []).map((item) => (
               <span
                 key={item.date}
-                className={item.units ? 'active' : ''}
-                title={`${item.date} · ${item.units} 单元`}
+                className={(item.units || item.microPractices) ? 'active' : ''}
+                title={`${item.date} · ${item.units} 单元 · ${item.microPractices || 0} 轻练`}
               />
             ))}
           </div>
@@ -1644,7 +1772,7 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
   const difficultyTrend = stats.difficultyTrend || []
   const maxActivityMinutes = Math.max(1, ...activity.map((item) => Number(item.minutes || 0)))
   const maxVocabularyAdded = Math.max(1, ...vocabularyDaily.map((item) => Number(item.added || 0)))
-  const goalPercent = Math.min(100, Math.round(((stats.todayReadingMinutes || 0) / Math.max(1, stats.dailyGoalMinutes || 10)) * 100))
+  const goalPercent = Math.min(100, Math.round(((stats.todayStudyMinutes || 0) / Math.max(1, stats.dailyGoalMinutes || 10)) * 100))
 
   return (
     <section className="dashboard-page">
@@ -1652,7 +1780,7 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
         <div>
           <span className="eyebrow">学习数据</span>
           <h1>你的英语学习仪表盘</h1>
-          <p>按完成单元估算阅读时长，结合生词和难度变化观察学习负担。</p>
+          <p>把书籍阅读和每日轻练放在一起看，观察学习节奏、生词和难度变化。</p>
         </div>
         <button className="ghost-button" type="button" onClick={() => onNavigate('reports')}>
           <BarChart3 size={17} />
@@ -1661,9 +1789,10 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
       </div>
 
       <div className="stat-row dashboard-kpis">
-        <MetricCard icon={Flame} label="连续学习" value={`${stats.streakDays || 0} 天`} detail={stats.todayGoalMet ? '今日目标已完成' : `今日 ${stats.todayCompleted || 0}/${stats.dailyGoalUnits || 1} 单元`} />
-        <MetricCard icon={Clock} label="阅读分钟数" value={`${formatNumber(stats.readingMinutes || 0)} 分钟`} detail={`近 7 天 ${formatNumber(stats.weeklyReadingMinutes || 0)} 分钟`} />
+        <MetricCard icon={Flame} label="连续学习" value={`${stats.streakDays || 0} 天`} detail={stats.todayGoalMet ? '今日目标已完成' : `今日 ${stats.todayCompleted || 0} 单元 · ${stats.todayMicroPractices || 0} 轻练`} />
+        <MetricCard icon={Clock} label="学习分钟数" value={`${formatNumber(stats.studyMinutesTotal || stats.readingMinutes || 0)} 分钟`} detail={`近 7 天 ${formatNumber(stats.weeklyStudyMinutes || stats.weeklyReadingMinutes || 0)} 分钟`} />
         <MetricCard icon={Check} label="完成单元" value={String(stats.completedUnits || 0)} detail={`平均正确率 ${formatPercent(stats.averageCorrectRate || 0)}`} />
+        <MetricCard icon={Brain} label="每日轻练" value={String(stats.microPracticeCount || 0)} detail={`轻练正确率 ${formatPercent(stats.microCorrectRate || 0)}`} />
         <MetricCard icon={BookMarked} label="生词增长" value={`${stats.vocabularyGrowth?.total || stats.vocabularyCount || 0} 个`} detail={`本周 +${stats.vocabularyGrowth?.addedThisWeek || 0}`} />
       </div>
 
@@ -1681,7 +1810,25 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
           </div>
           <div className="dashboard-note">
             <Clock size={16} />
-            今日 {formatNumber(stats.todayReadingMinutes || 0)} / {formatNumber(stats.dailyGoalMinutes || 10)} 分钟
+            今日 {formatNumber(stats.todayStudyMinutes || 0)} / {formatNumber(stats.dailyGoalMinutes || 10)} 分钟 · 轻练 {stats.todayMicroPractices || 0}/{stats.microDailyGoal || 1}
+          </div>
+        </article>
+
+        <article className="page-section dashboard-panel">
+          <div className="section-head">
+            <div>
+              <h2>每日轻练</h2>
+              <p>短文阅读和听力轻练会计入连续学习。</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => onNavigate('micro')}>
+              开始轻练
+            </button>
+          </div>
+          <div className="review-plan-grid">
+            <Stat label="今日完成" value={`${stats.todayMicroPractices || 0}/${stats.microDailyGoal || 1}`} />
+            <Stat label="本月目标" value={`${stats.microMonthPractices || 0}/${stats.microMonthlyGoal || 30}`} />
+            <Stat label="轻练正确率" value={formatPercent(stats.microCorrectRate || 0)} />
+            <Stat label="轻练分钟" value={String(stats.microPracticeMinutes || 0)} />
           </div>
         </article>
 
@@ -1706,22 +1853,22 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
         <article className="page-section dashboard-panel">
           <div className="section-head">
             <div>
-              <h2>阅读分钟趋势</h2>
-              <p>最近 30 天，按每单元学习时长估算。</p>
+              <h2>学习分钟趋势</h2>
+              <p>最近 30 天，包含书籍阅读和每日轻练。</p>
             </div>
-            <strong>{formatNumber(stats.todayReadingMinutes || 0)} 分钟/今日</strong>
+            <strong>{formatNumber(stats.todayStudyMinutes || 0)} 分钟/今日</strong>
           </div>
           {activity.some((item) => item.minutes > 0) ? (
-            <div className="bar-chart activity-chart" aria-label="阅读分钟趋势">
+            <div className="bar-chart activity-chart" aria-label="学习分钟趋势">
               {activity.map((item) => (
-                <div key={item.date} title={`${shortDate(item.date)} · ${item.minutes} 分钟 · ${item.units} 单元`}>
+                <div key={item.date} title={`${shortDate(item.date)} · ${item.minutes} 分钟 · ${item.units} 单元 · ${item.microPractices || 0} 轻练`}>
                   <span style={{ height: `${Math.max(6, Math.round((item.minutes / maxActivityMinutes) * 96))}px` }} />
-                  <small>{item.units || ''}</small>
+                  <small>{(item.units || item.microPractices) ? `${item.units || 0}/${item.microPractices || 0}` : ''}</small>
                 </div>
               ))}
             </div>
           ) : (
-            <SmallEmpty icon={Clock} text="完成单元后会显示阅读分钟趋势。" />
+            <SmallEmpty icon={Clock} text="完成单元或每日轻练后会显示学习分钟趋势。" />
           )}
         </article>
 
@@ -1817,6 +1964,7 @@ function Sidebar({
   const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
+    { view: 'micro', label: '轻练', icon: Brain },
     { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
@@ -1880,6 +2028,7 @@ function TopBar({
     library: '书库',
     book: '学习单元',
     study: '阅读训练',
+    micro: '每日轻练',
     dashboard: '学习数据',
     reports: '学习报告',
     vocabulary: '生词本',
@@ -1891,6 +2040,7 @@ function TopBar({
   const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
     { view: 'home', label: '首页', icon: Home },
     { view: 'library', label: '书库', icon: BookOpen },
+    { view: 'micro', label: '轻练', icon: Brain },
     { view: 'dashboard', label: '数据', icon: Activity },
     { view: 'reports', label: '报告', icon: BarChart3 },
     { view: 'vocabulary', label: '生词', icon: BookMarked },
@@ -3669,6 +3819,474 @@ function renderWords(
   })
 }
 
+function OptionSegment<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  options: Array<{ value: T; label: string }>
+  value: T
+  onChange: (value: T) => void
+  ariaLabel?: string
+}) {
+  return (
+    <div className="segmented" role="group" aria-label={ariaLabel}>
+      {options.map((option) => (
+        <button key={option.value} type="button" className={value === option.value ? 'active' : ''} onClick={() => onChange(option.value)}>
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function MicroPracticeView({
+  token,
+  settings,
+  stats,
+  books,
+  initialPractices,
+  initialAttempts,
+  onChanged,
+  onOpenBook,
+  onNavigate,
+  onError,
+}: {
+  token: string
+  settings: UserSettings
+  stats: AppData['stats']
+  books: Book[]
+  initialPractices: MicroPractice[]
+  initialAttempts: MicroAttempt[]
+  onChanged: () => void
+  onOpenBook: (book: Book) => void
+  onNavigate: (view: View) => void
+  onError: (message: string) => void
+}) {
+  const [practiceType, setPracticeType] = useState<MicroPracticeType>(settings.microPracticeType || 'random')
+  const [topic, setTopic] = useState<MicroPracticeTopic>(settings.microPracticeTopic || 'book')
+  const [difficulty, setDifficulty] = useState(settings.microPracticeDifficulty || settings.readingLevel || 'A2+')
+  const [customTopic, setCustomTopic] = useState(settings.microPracticeCustomTopic || '')
+  const [bookId, setBookId] = useState(books[0]?.id || '')
+  const [practices, setPractices] = useState(initialPractices)
+  const [attempts, setAttempts] = useState(initialAttempts)
+  const [current, setCurrent] = useState<MicroPractice | null>(initialPractices.find((item) => item.status !== 'completed') || null)
+  const [answers, setAnswers] = useState<Record<string, number>>({})
+  const [generating, setGenerating] = useState(false)
+  const [completing, setCompleting] = useState(false)
+  const [resultAttempt, setResultAttempt] = useState<MicroAttempt | null>(null)
+  const [startedAt, setStartedAt] = useState(Date.now())
+  const [transcriptVisible, setTranscriptVisible] = useState(false)
+  const [audioLoading, setAudioLoading] = useState(false)
+  const [audioPlaying, setAudioPlaying] = useState(false)
+  const [audioUrl, setAudioUrl] = useState('')
+  const [showCompletion, setShowCompletion] = useState(false)
+  const [statsSnapshot, setStatsSnapshot] = useState(stats)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const audioUrlRef = useRef('')
+  const recommendedTopic: MicroPracticeTopic = books.length ? 'book' : attempts.some((item) => item.correctRate < 0.7) ? 'weak-vocabulary' : 'history'
+  const recommendedLabel = recommendedTopic === 'book' ? '最近书籍' : recommendedTopic === 'weak-vocabulary' ? '薄弱生词' : '历史'
+  const recommendationText =
+    (statsSnapshot?.todayMicroPractices || 0) >= (statsSnapshot?.microDailyGoal || 1)
+      ? '今日轻练已完成，可以用薄弱项做一轮复盘。'
+      : books.length
+        ? '从最近书籍抽一个短练习，保持阅读主线不断。'
+        : '先用通用历史主题开始，建立每日输入节奏。'
+
+  useEffect(() => {
+    setPractices(initialPractices)
+    setAttempts(initialAttempts)
+    setCurrent((item) => item || initialPractices.find((practice) => practice.status !== 'completed') || null)
+  }, [initialPractices, initialAttempts])
+
+  useEffect(() => {
+    setStatsSnapshot(stats)
+  }, [stats])
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause()
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+    }
+  }, [])
+
+  const answeredAll = Boolean(current?.content.questions.every((question) => answers[question.id] !== undefined))
+
+  async function loadRecent() {
+    const result = await requestJson<{ practices: MicroPractice[]; attempts: MicroAttempt[]; stats: AppData['stats'] }>('/api/micro-practices/recent', token)
+    setPractices(result.practices)
+    setAttempts(result.attempts)
+    setStatsSnapshot(result.stats)
+  }
+
+  async function generatePractice() {
+    setGenerating(true)
+    setResultAttempt(null)
+    setShowCompletion(false)
+    try {
+      const result = await requestJson<{ practice: MicroPractice; stats: AppData['stats'] }>('/api/micro-practices/generate', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: practiceType,
+          topic,
+          difficulty,
+          customTopic,
+          bookId: topic === 'book' ? bookId : '',
+        }),
+      })
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+      audioUrlRef.current = ''
+      setAudioUrl('')
+      audioRef.current?.pause()
+      setAudioPlaying(false)
+      setCurrent(result.practice)
+      setPractices((items) => [result.practice, ...items.filter((item) => item.id !== result.practice.id)].slice(0, 20))
+      setAnswers({})
+      setStartedAt(Date.now())
+      setTranscriptVisible(result.practice.type === 'reading')
+      setStatsSnapshot(result.stats)
+      onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '每日轻练生成失败')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  async function playAudio() {
+    if (!current || current.type !== 'listening') return
+    const existing = audioRef.current
+    if (existing && audioPlaying) {
+      existing.pause()
+      setAudioPlaying(false)
+      return
+    }
+    if (existing?.src) {
+      await existing.play()
+      setAudioPlaying(true)
+      return
+    }
+
+    setAudioLoading(true)
+    try {
+      const response = await fetch(`/api/micro-practices/${current.id}/audio?t=${Date.now()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error('音频生成失败')
+      const blob = await response.blob()
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+      const url = URL.createObjectURL(blob)
+      audioUrlRef.current = url
+      setAudioUrl(url)
+      const audio = audioRef.current || new Audio()
+      audio.preload = 'auto'
+      audio.setAttribute('playsinline', 'true')
+      audio.src = url
+      audio.onplay = () => setAudioPlaying(true)
+      audio.onpause = () => setAudioPlaying(false)
+      audio.onended = () => setAudioPlaying(false)
+      audio.onerror = () => setAudioPlaying(false)
+      audioRef.current = audio
+      await audio.play()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '音频播放失败')
+    } finally {
+      setAudioLoading(false)
+    }
+  }
+
+  async function completePractice() {
+    if (!current || !answeredAll) return
+    setCompleting(true)
+    try {
+      const result = await requestJson<{ attempt: MicroAttempt; practice: MicroPractice; stats: AppData['stats'] }>(`/api/micro-practices/${current.id}/complete`, token, {
+        method: 'POST',
+        body: JSON.stringify({
+          answers,
+          elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        }),
+      })
+      setResultAttempt(result.attempt)
+      setCurrent(result.practice)
+      setPractices((items) => items.map((item) => (item.id === result.practice.id ? result.practice : item)))
+      setAttempts((items) => [result.attempt, ...items.filter((item) => item.id !== result.attempt.id)].slice(0, 30))
+      setStatsSnapshot(result.stats)
+      setShowCompletion(true)
+      onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '提交轻练失败')
+    } finally {
+      setCompleting(false)
+    }
+  }
+
+  function openPractice(practice: MicroPractice) {
+    audioRef.current?.pause()
+    setCurrent(practice)
+    setAnswers({})
+    setResultAttempt(null)
+    setShowCompletion(false)
+    setTranscriptVisible(practice.type === 'reading' || practice.status === 'completed')
+    setStartedAt(Date.now())
+  }
+
+  return (
+    <section className="micro-page">
+      <div className="page-section dashboard-hero micro-hero">
+        <div>
+          <span className="eyebrow">每日轻练</span>
+          <h1>忙的时候，也留一点英语输入</h1>
+          <p>生成一段短文或听力，答几道理解题，并把结果计入学习数据。</p>
+        </div>
+        <button className="primary-button" type="button" onClick={generatePractice} disabled={generating}>
+          {generating ? <Loader2 className="spin" size={18} /> : <Brain size={18} />}
+          {generating ? '生成中' : '开始新轻练'}
+        </button>
+      </div>
+
+      <div className="micro-layout">
+        <div className="micro-main">
+          <section className="page-section compact-section micro-controls">
+            <div className="micro-control-row">
+              <div>
+                <span className="eyebrow">类型</span>
+                <OptionSegment options={microPracticeTypeOptions} value={practiceType} onChange={setPracticeType} ariaLabel="轻练类型" />
+              </div>
+              <div>
+                <span className="eyebrow">难度</span>
+                <Segmented options={microDifficultyOptions} value={difficulty} onChange={setDifficulty} ariaLabel="轻练难度" />
+              </div>
+            </div>
+            <div className="micro-control-row">
+              <div>
+                <span className="eyebrow">主题</span>
+                <OptionSegment options={microPracticeTopicOptions} value={topic} onChange={setTopic} ariaLabel="轻练主题" />
+              </div>
+            </div>
+            {topic === 'custom' && (
+              <input className="search-input" value={customTopic} onChange={(event) => setCustomTopic(event.target.value)} placeholder="输入一个你想练习的主题" />
+            )}
+            {topic === 'book' && books.length > 0 && (
+              <select className="micro-select" value={bookId} onChange={(event) => setBookId(event.target.value)} aria-label="选择书籍">
+                <option value="">自动选择最近书籍</option>
+                {books.map((book) => (
+                  <option key={book.id} value={book.id}>{book.title}</option>
+                ))}
+              </select>
+            )}
+          </section>
+
+          {!current ? (
+            <div className="empty-state micro-empty">
+              <Brain size={32} />
+              <h2>还没有轻练</h2>
+              <p>选择类型、主题和难度后开始。</p>
+            </div>
+          ) : (
+            <section className="page-section micro-practice-card">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">{current.typeLabel} · {current.difficulty}</span>
+                  <h1>{current.content.title}</h1>
+                  <p>{current.topicLabel} · {current.sourceSummary}</p>
+                </div>
+                {current.sourceBookId && (
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => {
+                      const book = books.find((item) => item.id === current.sourceBookId)
+                      if (book) onOpenBook(book)
+                    }}
+                    disabled={!books.some((item) => item.id === current.sourceBookId)}
+                  >
+                    <BookOpen size={17} />
+                    来源书籍
+                  </button>
+                )}
+              </div>
+
+              {current.content.concepts.length > 0 && (
+                <div className="micro-concepts">
+                  {current.content.concepts.map((concept) => (
+                    <div key={`${current.id}-${concept.term}`}>
+                      <strong>{concept.term}</strong>
+                      <span>{concept.simpleEnglish}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {current.type === 'listening' ? (
+                <div className="micro-listening">
+                  <button className="primary-button" type="button" onClick={playAudio} disabled={audioLoading}>
+                    {audioLoading ? <Loader2 className="spin" size={18} /> : audioPlaying ? <Pause size={18} /> : <Play size={18} />}
+                    {audioLoading ? '生成音频' : audioPlaying ? '暂停' : '播放'}
+                  </button>
+                  {audioUrl && <audio className="podcast-audio" src={audioUrl} controls playsInline />}
+                  <button className="ghost-button" type="button" onClick={() => setTranscriptVisible((value) => !value)}>
+                    <Headphones size={18} />
+                    {transcriptVisible ? '隐藏文本' : '显示文本'}
+                  </button>
+                </div>
+              ) : null}
+
+              {(current.type === 'reading' || transcriptVisible) && (
+                <article className="micro-text">
+                  <p>{current.content.body}</p>
+                </article>
+              )}
+
+              {current.content.vocabulary.length > 0 && (
+                <div className="micro-vocab-row">
+                  {current.content.vocabulary.slice(0, 7).map((item) => (
+                    <span key={`${current.id}-${item.term}`}>{item.term} · {item.meaningZh}</span>
+                  ))}
+                </div>
+              )}
+
+              <div className="question-list">
+                {current.content.questions.map((question, questionIndex) => (
+                  <article key={question.id} className="question-item">
+                    <h3>{questionIndex + 1}. {question.prompt}</h3>
+                    <div className="options-grid">
+                      {question.options.map((option, optionIndex) => {
+                        const selected = answers[question.id] === optionIndex
+                        const isCorrect = resultAttempt && optionIndex === question.answerIndex
+                        const isWrong = resultAttempt && selected && optionIndex !== question.answerIndex
+                        return (
+                          <button
+                            key={`${question.id}-${option}`}
+                            type="button"
+                            className={`${selected ? 'selected' : ''}${isCorrect ? ' correct' : ''}${isWrong ? ' wrong' : ''}`}
+                            onClick={() => {
+                              if (!resultAttempt) setAnswers((items) => ({ ...items, [question.id]: optionIndex }))
+                            }}
+                          >
+                            {option}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {resultAttempt && <p className="answer-help">{question.explanationZh}</p>}
+                  </article>
+                ))}
+              </div>
+
+              <div className="micro-actions">
+                <button className="primary-button" type="button" onClick={completePractice} disabled={!answeredAll || completing || Boolean(resultAttempt)}>
+                  {completing ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
+                  {resultAttempt ? '已完成' : '提交答案'}
+                </button>
+                <button className="ghost-button" type="button" onClick={generatePractice} disabled={generating}>
+                  <RotateCcw size={18} />
+                  换一题
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+
+        <aside className="micro-side">
+          <section className="page-section compact-section">
+            <div className="section-head">
+              <div>
+                <span className="eyebrow">今日推荐</span>
+                <h2>{recommendedLabel}</h2>
+                <p>{recommendationText}</p>
+              </div>
+            </div>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => {
+                setTopic(recommendedTopic)
+                setPracticeType(settings.microPracticeType || 'random')
+                setDifficulty(settings.microPracticeDifficulty || settings.readingLevel || 'A2+')
+              }}
+            >
+              <Brain size={17} />
+              使用推荐
+            </button>
+          </section>
+
+          <section className="page-section compact-section">
+            <h2>轻练目标</h2>
+            <div className="review-plan-grid micro-goal-grid">
+              <Stat label="今日" value={`${statsSnapshot.todayMicroPractices || 0}/${statsSnapshot.microDailyGoal ?? 1}`} />
+              <Stat label="本月" value={`${statsSnapshot.microMonthPractices || 0}/${statsSnapshot.microMonthlyGoal ?? 30}`} />
+            </div>
+          </section>
+
+          <section className="page-section compact-section">
+            <div className="section-head">
+              <div>
+                <h2>最近记录</h2>
+                <p>{attempts.length ? `${attempts.length} 次轻练` : '完成后显示'}</p>
+              </div>
+              <button className="ghost-button" type="button" onClick={() => loadRecent().catch(() => undefined)}>
+                <RotateCcw size={16} />
+                刷新
+              </button>
+            </div>
+            {attempts.length ? (
+              <div className="micro-history">
+                {attempts.slice(0, 10).map((attempt) => (
+                  <div key={attempt.id}>
+                    <strong>{attempt.topicLabel}</strong>
+                    <span>{attempt.type === 'listening' ? '听力' : '阅读'} · {attempt.difficulty} · {attempt.correctCount}/{attempt.questionCount} · {formatDateTime(attempt.createdAt)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <SmallEmpty icon={Brain} text="完成每日轻练后会记录正确率、难度和用时。" />
+            )}
+          </section>
+
+          {practices.length > 0 && (
+            <section className="page-section compact-section">
+              <h2>最近生成</h2>
+              <div className="micro-practice-list">
+                {practices.slice(0, 6).map((practice) => (
+                  <button key={practice.id} type="button" onClick={() => openPractice(practice)}>
+                    <strong>{practice.content.title}</strong>
+                    <span>{practice.typeLabel} · {practice.topicLabel} · {practice.difficulty}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </aside>
+      </div>
+
+      {showCompletion && resultAttempt && (
+        <div className="completion-overlay" role="dialog" aria-modal="true">
+          <div className="completion-panel">
+            <span className="eyebrow">完成报告</span>
+            <h2>{resultAttempt.correctCount}/{resultAttempt.questionCount} 正确 · {formatPercent(resultAttempt.correctRate)}</h2>
+            <p>{resultAttempt.suggestion || '这次轻练已记录。'}</p>
+            <div className="report-metrics">
+              <Stat label="学习时长" value={`${resultAttempt.studyMinutes} 分钟`} />
+              <Stat label="关联生词" value={String(resultAttempt.savedVocabularyCount || 0)} />
+            </div>
+            <div className="completion-actions">
+              <button className="primary-button" type="button" onClick={() => setShowCompletion(false)}>
+                <Check size={18} />
+                查看详情
+              </button>
+              <button className="ghost-button" type="button" onClick={() => onNavigate('dashboard')}>
+                <Activity size={18} />
+                看数据
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function ReportsView({
   reports,
   settings,
@@ -4607,6 +5225,66 @@ function SettingsView({
           <button type="button" onClick={() => setDraft({ ...draft, studyMinutes: Math.min(30, draft.studyMinutes + 5) })}>
             +
           </button>
+        </div>
+      </SettingGroup>
+
+      <SettingGroup title="每日轻练类型">
+        <OptionSegment
+          options={microPracticeTypeOptions}
+          value={draft.microPracticeType || 'random'}
+          onChange={(microPracticeType) => setDraft({ ...draft, microPracticeType })}
+          ariaLabel="默认轻练类型"
+        />
+      </SettingGroup>
+
+      <SettingGroup title="每日轻练主题">
+        <div className="setting-stack">
+          <OptionSegment
+            options={microPracticeTopicOptions}
+            value={draft.microPracticeTopic || 'book'}
+            onChange={(microPracticeTopic) => setDraft({ ...draft, microPracticeTopic })}
+            ariaLabel="默认轻练主题"
+          />
+          {(draft.microPracticeTopic || 'book') === 'custom' && (
+            <input
+              className="search-input"
+              value={draft.microPracticeCustomTopic || ''}
+              onChange={(event) => setDraft({ ...draft, microPracticeCustomTopic: event.target.value })}
+              placeholder="自定义主题"
+            />
+          )}
+        </div>
+      </SettingGroup>
+
+      <SettingGroup title="每日轻练难度">
+        <Segmented
+          options={microDifficultyOptions}
+          value={draft.microPracticeDifficulty || draft.readingLevel}
+          onChange={(microPracticeDifficulty) => setDraft({ ...draft, microPracticeDifficulty })}
+          ariaLabel="默认轻练难度"
+        />
+      </SettingGroup>
+
+      <SettingGroup title="轻练目标">
+        <div className="target-steppers">
+          <div className="stepper">
+            <button type="button" onClick={() => setDraft({ ...draft, microPracticeDailyGoal: Math.max(0, (draft.microPracticeDailyGoal ?? 1) - 1) })}>
+              -
+            </button>
+            <span>日 {draft.microPracticeDailyGoal ?? 1} 次</span>
+            <button type="button" onClick={() => setDraft({ ...draft, microPracticeDailyGoal: Math.min(10, (draft.microPracticeDailyGoal ?? 1) + 1) })}>
+              +
+            </button>
+          </div>
+          <div className="stepper">
+            <button type="button" onClick={() => setDraft({ ...draft, microPracticeMonthlyGoal: Math.max(0, (draft.microPracticeMonthlyGoal ?? 30) - 5) })}>
+              -
+            </button>
+            <span>月 {draft.microPracticeMonthlyGoal ?? 30} 次</span>
+            <button type="button" onClick={() => setDraft({ ...draft, microPracticeMonthlyGoal: Math.min(300, (draft.microPracticeMonthlyGoal ?? 30) + 5) })}>
+              +
+            </button>
+          </div>
         </div>
       </SettingGroup>
 

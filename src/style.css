@@ -1836,6 +1836,19 @@ p {
   background: var(--green-2);
 }
 
+.options-grid button.correct {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line));
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-3) 52%, #ffffff);
+  font-weight: 760;
+}
+
+.options-grid button.wrong {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  color: var(--danger);
+  background: var(--danger-2);
+}
+
 .answer-help p {
   margin-top: 8px;
 }
@@ -1921,6 +1934,206 @@ p {
 .level-adjustment.applied {
   color: var(--green);
   background: var(--green-2);
+}
+
+.micro-page {
+  display: grid;
+  gap: 18px;
+}
+
+.micro-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 18px;
+  align-items: start;
+}
+
+.micro-main,
+.micro-side,
+.micro-controls,
+.micro-practice-card,
+.micro-history,
+.micro-practice-list,
+.setting-stack,
+.target-steppers {
+  display: grid;
+  gap: 12px;
+}
+
+.micro-hero {
+  min-height: 150px;
+}
+
+.micro-control-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.micro-control-row > div {
+  min-width: min(100%, 260px);
+  display: grid;
+  gap: 7px;
+}
+
+.micro-select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.micro-empty {
+  min-height: 260px;
+}
+
+.micro-practice-card .section-head {
+  align-items: flex-start;
+}
+
+.micro-concepts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.micro-concepts div,
+.micro-history div,
+.micro-practice-list button {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-2);
+  display: grid;
+  gap: 4px;
+}
+
+.micro-concepts strong,
+.micro-history strong,
+.micro-practice-list strong {
+  overflow-wrap: anywhere;
+}
+
+.micro-concepts span,
+.micro-history span,
+.micro-practice-list span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.micro-listening,
+.micro-actions,
+.completion-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.micro-listening {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.micro-listening .podcast-audio {
+  flex: 1 1 260px;
+}
+
+.micro-text {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.micro-text p {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 1.08rem;
+  line-height: 1.88;
+}
+
+.micro-vocab-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.micro-vocab-row span {
+  padding: 5px 8px;
+  border-radius: 8px;
+  color: var(--blue);
+  background: var(--blue-2);
+  font-size: 0.84rem;
+  font-weight: 720;
+}
+
+.micro-actions {
+  margin-top: 14px;
+}
+
+.micro-side {
+  position: sticky;
+  top: 24px;
+}
+
+.micro-practice-list button {
+  border-color: var(--line);
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.micro-practice-list button:hover {
+  border-color: var(--green);
+}
+
+.micro-goal-grid {
+  margin-top: 12px;
+}
+
+.target-steppers {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.target-steppers .stepper {
+  grid-template-columns: 38px minmax(92px, 1fr) 38px;
+}
+
+.completion-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  padding: 20px;
+  background: rgba(26, 28, 26, 0.38);
+  display: grid;
+  place-items: center;
+}
+
+.completion-panel {
+  width: min(520px, 100%);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-raised);
+  display: grid;
+  gap: 14px;
+}
+
+.completion-panel h2 {
+  color: var(--green);
+  font-family: var(--font-serif);
+  font-size: 1.5rem;
 }
 
 .vocab-card {
@@ -2550,7 +2763,7 @@ p {
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     box-shadow: var(--shadow-raised);
     display: grid;
-    grid-template-columns: repeat(9, minmax(28px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(38px, 1fr));
     gap: 2px;
     padding: 4px;
     overflow: hidden;
@@ -2716,6 +2929,32 @@ p {
   }
 
   .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .micro-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .micro-side {
+    position: static;
+  }
+
+  .micro-control-row,
+  .micro-listening,
+  .micro-actions,
+  .completion-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .micro-control-row > div,
+  .micro-control-row .segmented,
+  .micro-listening .podcast-audio {
+    width: 100%;
+  }
+
+  .target-steppers {
     grid-template-columns: 1fr;
   }
 

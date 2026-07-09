@@ -71,6 +71,7 @@ RATE_LIMIT_WINDOW_MINUTES=60
 RATE_LIMIT_GENERATE_UNITS_MAX=20
 RATE_LIMIT_DEFINITIONS_MAX=120
 RATE_LIMIT_AUDIO_MAX=30
+RATE_LIMIT_MICRO_PRACTICE_MAX=40
 RATE_LIMIT_SERVICE_TEST_MAX=12
 GEMINI_TTS_OFFICIAL_BASE_URL=https://yunwu.ai
 GEMINI_TTS_OFFICIAL_API_KEY=
@@ -159,6 +160,10 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 系统会保存每个单元的上次阅读段落、听力完成状态和理解题草稿。首页会优先显示未完成单元，并显示每日目标、连续学习天数、最近 14 天学习日历和今日进度。
 
+## 每日轻练
+
+“轻练”页可以按最近书籍、薄弱生词、历史、政治、经济、科技或自定义主题生成 2-3 分钟的短文阅读/听力练习。完成后会保存正确率、用时、关联生词和难度建议，并计入首页连续学习、学习数据仪表盘、今日目标和月目标。
+
 ## 原书文件
 
 默认会保存上传的 EPUB/PDF，便于以后重新处理。也可以在设置页关闭“原书文件保留”，关闭后新上传的原始文件不会写入 `data/uploads`；应用仍会保存生成学习单元所需的文本片段和学习记录。
@@ -177,7 +182,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 管理后台集中显示任务统计、失败类型、备份状态、AI 服务状态、存储占用和最近错误日志。任务中心支持按任务类型和失败原因过滤。
 
-上传、生成、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_UPLOAD_MAX`、`RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。服务状态和管理后台接口仅管理员可访问。
+上传、生成、每日轻练、单词释义、TTS 音频和服务状态测试默认按用户限流，时间窗口由 `RATE_LIMIT_WINDOW_MINUTES` 控制，额度分别由 `RATE_LIMIT_UPLOAD_MAX`、`RATE_LIMIT_GENERATE_UNITS_MAX`、`RATE_LIMIT_MICRO_PRACTICE_MAX`、`RATE_LIMIT_DEFINITIONS_MAX`、`RATE_LIMIT_AUDIO_MAX`、`RATE_LIMIT_SERVICE_TEST_MAX` 控制。设为 `0` 可关闭对应限制。服务状态和管理后台接口仅管理员可访问。
 
 ## 生词本
 

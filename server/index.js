@@ -82,6 +82,7 @@ const aiRateLimits = {
   'define-word': { max: Number(process.env.RATE_LIMIT_DEFINITIONS_MAX || 120), windowMs: rateLimitWindowMs },
   'speech-audio': { max: Number(process.env.RATE_LIMIT_AUDIO_MAX || 30), windowMs: rateLimitWindowMs },
   'generate-podcast': { max: Number(process.env.RATE_LIMIT_PODCAST_EPISODES_MAX || 12), windowMs: rateLimitWindowMs },
+  'generate-micro-practice': { max: Number(process.env.RATE_LIMIT_MICRO_PRACTICE_MAX || 40), windowMs: rateLimitWindowMs },
   'service-test': { max: Number(process.env.RATE_LIMIT_SERVICE_TEST_MAX || 12), windowMs: rateLimitWindowMs },
 }
 const loginAttempts = new Map()
@@ -109,6 +110,8 @@ const defaultDb = {
   settings: [],
   jobs: [],
   podcasts: [],
+  microPractices: [],
+  microAttempts: [],
   serviceChecks: [],
   errorLogs: [],
   aiUsage: [],
@@ -592,16 +595,55 @@ function userSettings(db, userId) {
       keepSourceFiles: true,
       podcastLexile: podcastLexileDefault,
       podcastVoice: process.env.GEMINI_TTS_VOICE || 'Kore',
+      microPracticeType: 'random',
+      microPracticeTopic: 'book',
+      microPracticeDifficulty: 'A2+',
+      microPracticeDailyGoal: 1,
+      microPracticeMonthlyGoal: 30,
+      microPracticeCustomTopic: '',
     }
     db.settings.push(settings)
   }
   if (settings.focusStudyMode === undefined) settings.focusStudyMode = true
   if (!settings.podcastLexile) settings.podcastLexile = podcastLexileDefault
   if (!settings.podcastVoice) settings.podcastVoice = process.env.GEMINI_TTS_VOICE || 'Kore'
+  if (!settings.microPracticeType) settings.microPracticeType = 'random'
+  if (!settings.microPracticeTopic) settings.microPracticeTopic = 'book'
+  if (!settings.microPracticeDifficulty) settings.microPracticeDifficulty = settings.readingLevel || 'A2+'
+  if (settings.microPracticeDailyGoal === undefined) settings.microPracticeDailyGoal = 1
+  if (settings.microPracticeMonthlyGoal === undefined) settings.microPracticeMonthlyGoal = 30
+  if (settings.microPracticeCustomTopic === undefined) settings.microPracticeCustomTopic = ''
   settings.readingLevel = normalizeLevel(readingLevels, settings.readingLevel, 'A2+')
   settings.listeningLevel = normalizeLevel(listeningLevels, settings.listeningLevel, 'A2')
   settings.podcastLexile = Math.max(podcastLexileMin, Math.min(podcastLexileMax, Number(settings.podcastLexile || podcastLexileDefault)))
+  settings.microPracticeType = normalizeMicroPracticeType(settings.microPracticeType, 'random')
+  settings.microPracticeTopic = normalizeMicroPracticeTopic(settings.microPracticeTopic, 'book')
+  settings.microPracticeDifficulty = normalizeLevel([...listeningLevels, ...readingLevels], settings.microPracticeDifficulty, settings.readingLevel)
+  settings.microPracticeDailyGoal = Math.max(0, Math.min(10, Math.round(Number(settings.microPracticeDailyGoal ?? 1))))
+  settings.microPracticeMonthlyGoal = Math.max(0, Math.min(300, Math.round(Number(settings.microPracticeMonthlyGoal ?? 30))))
+  settings.microPracticeCustomTopic = normalizeText(settings.microPracticeCustomTopic).slice(0, 80)
   return settings
+}
+
+function normalizeMicroPracticeType(value, fallback = 'random') {
+  const type = String(value || '').trim().toLowerCase()
+  if (['reading', 'text', 'short-reading', '阅读'].includes(type)) return 'reading'
+  if (['listening', 'audio', '听力'].includes(type)) return 'listening'
+  if (['random', '随机'].includes(type)) return 'random'
+  return fallback
+}
+
+function normalizeMicroPracticeTopic(value, fallback = 'book') {
+  const topic = String(value || '').trim().toLowerCase()
+  if (['book', 'recent-book', 'current-book', '书籍主题', '最近书籍'].includes(topic)) return 'book'
+  if (['weak-vocabulary', 'vocabulary', 'words', '薄弱生词', '生词'].includes(topic)) return 'weak-vocabulary'
+  if (['history', '历史'].includes(topic)) return 'history'
+  if (['politics', 'political', '政治'].includes(topic)) return 'politics'
+  if (['economics', 'economy', 'economic', '经济'].includes(topic)) return 'economics'
+  if (['technology', 'tech', '科技'].includes(topic)) return 'technology'
+  if (['random', '随机'].includes(topic)) return 'random'
+  if (['custom', '自定义'].includes(topic)) return 'custom'
+  return fallback
 }
 
 function normalizePodcastKind(value) {
@@ -3526,17 +3568,28 @@ function computeStats(db, userId) {
   const reports = db.reports
     .filter((item) => item.userId === userId)
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+  const microAttempts = (db.microAttempts || [])
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
   const vocabulary = db.vocabulary.filter((item) => item.userId === userId)
   const settings = userSettings(db, userId)
   const now = Date.now()
   const today = new Date().toISOString().slice(0, 10)
+  const currentMonth = today.slice(0, 7)
   const completedUnits = reports.length
+  const microPracticeCount = microAttempts.length
+  const microMonthPractices = microAttempts.filter((attempt) => String(attempt.createdAt || '').slice(0, 7) === currentMonth).length
   const averageCorrectRate = reports.length
     ? reports.reduce((total, report) => total + Number(report.correctRate || 0), 0) / reports.length
+    : 0
+  const microCorrectRate = microAttempts.length
+    ? microAttempts.reduce((total, attempt) => total + Number(attempt.correctRate || 0), 0) / microAttempts.length
     : 0
   const dueVocabulary = vocabulary.filter((item) => !item.dueAt || Date.parse(item.dueAt) <= now).length
   const masteredVocabulary = vocabulary.filter((item) => Number(item.mastery || 0) >= 4).length
   const readingMinutes = reports.reduce((total, report) => total + reportStudyMinutes(report, settings), 0)
+  const microPracticeMinutes = microAttempts.reduce((total, attempt) => total + Math.max(1, Math.round(Number(attempt.studyMinutes || 2))), 0)
+  const studyMinutesTotal = readingMinutes + microPracticeMinutes
   const recentReports = reports
     .filter((report) => Date.parse(report.createdAt) >= now - 14 * 24 * 60 * 60 * 1000)
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
@@ -3549,11 +3602,23 @@ function computeStats(db, userId) {
   for (const report of reports) {
     const date = String(report.createdAt || '').slice(0, 10)
     if (!date) continue
-    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0, minutes: 0 }
+    const item = dailyMap.get(date) || { date, units: 0, microPractices: 0, words: 0, correctRate: 0, scoreCount: 0, minutes: 0 }
     item.units += 1
     item.words += Number(report.newVocabularyCount || 0)
     item.correctRate += Number(report.correctRate || 0)
+    item.scoreCount += 1
     item.minutes += reportStudyMinutes(report, settings)
+    dailyMap.set(date, item)
+  }
+  for (const attempt of microAttempts) {
+    const date = String(attempt.createdAt || '').slice(0, 10)
+    if (!date) continue
+    const item = dailyMap.get(date) || { date, units: 0, microPractices: 0, words: 0, correctRate: 0, scoreCount: 0, minutes: 0 }
+    item.microPractices += 1
+    item.words += Number(attempt.savedVocabularyCount || 0)
+    item.correctRate += Number(attempt.correctRate || 0)
+    item.scoreCount += 1
+    item.minutes += Math.max(1, Math.round(Number(attempt.studyMinutes || 2)))
     dailyMap.set(date, item)
   }
   const calendar = buildDailySeries(dailyMap, now, 14)
@@ -3566,12 +3631,23 @@ function computeStats(db, userId) {
   const listeningDelta = previousDifficulty
     ? levelIndex(listeningLevels, lastDifficulty.listeningLevel) - levelIndex(listeningLevels, previousDifficulty.listeningLevel)
     : 0
-  const weeklyReadingMinutes = activity.slice(-7).reduce((total, item) => total + Number(item.minutes || 0), 0)
+  const weeklyStudyMinutes = activity.slice(-7).reduce((total, item) => total + Number(item.minutes || 0), 0)
+  const weeklyReadingMinutes = reports
+    .filter((report) => Date.parse(report.createdAt || '') >= now - 7 * 24 * 60 * 60 * 1000)
+    .reduce((total, report) => total + reportStudyMinutes(report, settings), 0)
   const todayCompleted = dailyMap.get(today)?.units || 0
-  const todayReadingMinutes = dailyMap.get(today)?.minutes || 0
+  const todayMicroPractices = dailyMap.get(today)?.microPractices || 0
+  const todayStudyMinutes = dailyMap.get(today)?.minutes || 0
+  const todayReadingMinutes = reports
+    .filter((report) => String(report.createdAt || '').slice(0, 10) === today)
+    .reduce((total, report) => total + reportStudyMinutes(report, settings), 0)
   const dailyGoalMinutes = Math.max(1, Math.round(Number(settings.studyMinutes || 10)))
   const dailyGoalUnits = Math.max(1, Math.round(dailyGoalMinutes / 10))
-  const todayGoalMet = todayReadingMinutes >= dailyGoalMinutes || todayCompleted >= dailyGoalUnits
+  const microDailyGoal = Math.max(0, Math.round(Number(settings.microPracticeDailyGoal ?? 1)))
+  const microMonthlyGoal = Math.max(0, Math.round(Number(settings.microPracticeMonthlyGoal ?? 30)))
+  const microTodayGoalMet = microDailyGoal === 0 || todayMicroPractices >= microDailyGoal
+  const microMonthGoalMet = microMonthlyGoal === 0 || microMonthPractices >= microMonthlyGoal
+  const todayGoalMet = todayStudyMinutes >= dailyGoalMinutes || todayCompleted >= dailyGoalUnits || microTodayGoalMet
   const dueTomorrow = vocabulary.filter((item) => {
     const due = Date.parse(item.dueAt || '')
     return Number.isFinite(due) && due > now && due <= now + 24 * 60 * 60 * 1000
@@ -3619,27 +3695,57 @@ function computeStats(db, userId) {
   let streakDays = 0
   for (let index = 0; index < 365; index += 1) {
     const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-    if ((dailyMap.get(date)?.units || 0) === 0) break
+    const day = dailyMap.get(date)
+    if ((day?.units || 0) + (day?.microPractices || 0) === 0) break
     streakDays += 1
   }
+  const recentMicroPractices = microAttempts
+    .slice(-12)
+    .reverse()
+    .map((attempt) => ({
+      id: attempt.id,
+      practiceId: attempt.practiceId,
+      type: attempt.type,
+      topicLabel: attempt.topicLabel || attempt.topic || '每日轻练',
+      difficulty: attempt.difficulty,
+      correctCount: Number(attempt.correctCount || 0),
+      questionCount: Number(attempt.questionCount || 0),
+      correctRate: Number(attempt.correctRate || 0),
+      studyMinutes: Number(attempt.studyMinutes || 0),
+      savedVocabularyCount: Number(attempt.savedVocabularyCount || 0),
+      createdAt: attempt.createdAt,
+    }))
 
   return {
     completedUnits,
+    microPracticeCount,
+    microMonthPractices,
     averageCorrectRate,
+    microCorrectRate,
     vocabularyCount: vocabulary.length,
     dueVocabulary,
     masteredVocabulary,
     recentReports,
     todayCompleted,
+    todayMicroPractices,
     dailyGoalUnits,
     dailyGoalMinutes,
+    microDailyGoal,
+    microMonthlyGoal,
+    microTodayGoalMet,
+    microMonthGoalMet,
     todayGoalMet,
     streakDays,
     calendar,
     readingMinutes,
+    microPracticeMinutes,
+    studyMinutesTotal,
     todayReadingMinutes,
+    todayStudyMinutes,
     weeklyReadingMinutes,
+    weeklyStudyMinutes,
     activity,
+    recentMicroPractices,
     vocabularyGrowth,
     reviewPlan,
     recommendation,
@@ -3664,8 +3770,12 @@ function buildDailySeries(dailyMap, now, days) {
   const items = []
   for (let index = days - 1; index >= 0; index -= 1) {
     const date = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-    const item = dailyMap.get(date) || { date, units: 0, words: 0, correctRate: 0, minutes: 0 }
-    items.push({ ...item, correctRate: item.units ? item.correctRate / item.units : 0 })
+    const item = dailyMap.get(date) || { date, units: 0, microPractices: 0, words: 0, correctRate: 0, scoreCount: 0, minutes: 0 }
+    items.push({
+      ...item,
+      microPractices: Number(item.microPractices || 0),
+      correctRate: item.scoreCount ? item.correctRate / item.scoreCount : 0,
+    })
   }
   return items
 }
@@ -4275,6 +4385,503 @@ async function buildGeneratedContent(unit, generationSettings) {
   content.qualityAudit = await auditContentFidelity(content, unit)
   if (aiError) content.fidelityNote = `${content.fidelityNote || ''} AI 调用失败，已使用本地演示生成器。${aiError}`.trim()
   return content
+}
+
+const microPracticeSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    body: { type: 'string' },
+    transcriptHiddenByDefault: { type: 'boolean' },
+    sourceSummary: { type: 'string' },
+    concepts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          term: { type: 'string' },
+          simpleEnglish: { type: 'string' },
+          chinese: { type: 'string' },
+        },
+        required: ['term', 'simpleEnglish', 'chinese'],
+      },
+    },
+    vocabulary: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          term: { type: 'string' },
+          meaningZh: { type: 'string' },
+          simpleEnglish: { type: 'string' },
+        },
+        required: ['term', 'meaningZh', 'simpleEnglish'],
+      },
+    },
+    questions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          prompt: { type: 'string' },
+          options: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          answerIndex: { type: 'number' },
+          explanationZh: { type: 'string' },
+          relatedTerms: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+        },
+        required: ['id', 'prompt', 'options', 'answerIndex', 'explanationZh', 'relatedTerms'],
+      },
+    },
+  },
+  required: ['title', 'body', 'transcriptHiddenByDefault', 'sourceSummary', 'concepts', 'vocabulary', 'questions'],
+}
+
+function microPracticeTypeLabel(type) {
+  return normalizeMicroPracticeType(type) === 'listening' ? '听力轻练' : '短文阅读'
+}
+
+function microTopicLabel(topic) {
+  const labels = {
+    book: '最近书籍',
+    'weak-vocabulary': '薄弱生词',
+    history: '历史',
+    politics: '政治',
+    economics: '经济',
+    technology: '科技',
+    random: '随机主题',
+    custom: '自定义主题',
+  }
+  return labels[normalizeMicroPracticeTopic(topic)] || '每日轻练'
+}
+
+function resolveMicroPracticeType(settings, body = {}) {
+  const requested = normalizeMicroPracticeType(body.type || body.practiceType || settings.microPracticeType, 'random')
+  if (requested !== 'random') return requested
+  return Math.random() > 0.48 ? 'reading' : 'listening'
+}
+
+function resolveMicroDifficulty(settings, body = {}) {
+  return normalizeLevel([...listeningLevels, ...readingLevels], body.difficulty || settings.microPracticeDifficulty, settings.readingLevel)
+}
+
+function userBooksSorted(db, userId) {
+  return db.books
+    .filter((book) => book.userId === userId)
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+}
+
+function selectMicroBook(db, userId, bookId = '') {
+  const books = userBooksSorted(db, userId)
+  if (!books.length) return null
+  if (bookId) return books.find((book) => book.id === bookId) || null
+  const userBookIds = new Set(books.map((book) => book.id))
+  const recentProgress = db.progress
+    .filter((item) => item.userId === userId && userBookIds.has(db.units.find((unit) => unit.id === item.unitId)?.bookId))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+  const progressUnit = recentProgress.length ? db.units.find((unit) => unit.id === recentProgress[0].unitId) : null
+  if (progressUnit) return books.find((book) => book.id === progressUnit.bookId) || books[0]
+  return books[0]
+}
+
+function buildMicroPracticeContext(db, userId, settings, body = {}) {
+  let topic = normalizeMicroPracticeTopic(body.topic || settings.microPracticeTopic, 'book')
+  const books = userBooksSorted(db, userId)
+  const vocabulary = db.vocabulary.filter((item) => item.userId === userId)
+  if (topic === 'random') {
+    const pool = ['history', 'politics', 'economics', 'technology']
+    if (books.length) pool.push('book')
+    if (vocabulary.length) pool.push('weak-vocabulary')
+    topic = pool[Math.floor(Math.random() * pool.length)] || 'history'
+  }
+
+  if (topic === 'book') {
+    const book = selectMicroBook(db, userId, body.bookId)
+    if (book) {
+      const units = db.units.filter((unit) => unit.bookId === book.id)
+      const generatedUnits = units.filter((unit) => unit.content)
+      const glossary = buildBookGlossary(book, units)
+      const glossaryTerms = (glossary.items || []).slice(0, 10).map((item) => item.term)
+      const generatedTerms = generatedUnits
+        .flatMap((unit) => unit.content?.vocabulary || [])
+        .map((item) => item.term)
+        .filter(Boolean)
+        .slice(0, 10)
+      const keyTerms = [...new Set([...glossaryTerms, ...generatedTerms])].slice(0, 10)
+      const contextUnits = generatedUnits.length ? generatedUnits.slice(-8) : units.slice(0, 8)
+      const sourceContext = representativeBookSource(contextUnits, 1200) || takeWords(units.map((unit) => unit.sourceExcerpt).join('\n\n'), 900)
+      return {
+        topic,
+        topicLabel: `书籍：${book.title}`,
+        sourceMode: 'book',
+        sourceBookId: book.id,
+        sourceBookTitle: book.title,
+        sourceSummary: `来自《${book.title}》的近期学习内容。`,
+        sourceContext,
+        keyTerms,
+      }
+    }
+    topic = 'history'
+  }
+
+  if (topic === 'weak-vocabulary') {
+    const now = Date.now()
+    const weakItems = vocabulary
+      .filter((item) => Number(item.mastery || 0) <= 2 || !item.dueAt || Date.parse(item.dueAt || '') <= now)
+      .sort((a, b) => Number(a.mastery || 0) - Number(b.mastery || 0))
+      .slice(0, 10)
+    if (weakItems.length) {
+      return {
+        topic,
+        topicLabel: '薄弱生词',
+        sourceMode: 'vocabulary',
+        sourceBookId: '',
+        sourceBookTitle: '',
+        sourceSummary: `围绕 ${weakItems.slice(0, 5).map((item) => item.term).join(', ')} 等薄弱词生成。`,
+        sourceContext: weakItems.map((item) => `${item.term}: ${item.simpleEnglish || item.meaningZh || ''}`).join('\n'),
+        keyTerms: weakItems.map((item) => item.term).filter(Boolean),
+      }
+    }
+    topic = 'history'
+  }
+
+  if (topic === 'custom') {
+    const custom = normalizeText(body.customTopic || settings.microPracticeCustomTopic).slice(0, 80)
+    if (custom) {
+      return {
+        topic,
+        topicLabel: custom,
+        sourceMode: 'custom',
+        sourceBookId: '',
+        sourceBookTitle: '',
+        sourceSummary: `自定义主题：${custom}`,
+        sourceContext: '',
+        keyTerms: extractKeywords(custom, 6),
+      }
+    }
+    topic = 'history'
+  }
+
+  const genericTopics = {
+    history: 'history and historical change',
+    politics: 'political institutions and public decisions',
+    economics: 'markets, trade, work, and economic choices',
+    technology: 'technology and its effects on society',
+  }
+  return {
+    topic,
+    topicLabel: microTopicLabel(topic),
+    sourceMode: 'general',
+    sourceBookId: '',
+    sourceBookTitle: '',
+    sourceSummary: `通用主题：${microTopicLabel(topic)}`,
+    sourceContext: genericTopics[topic] || genericTopics.history,
+    keyTerms: extractKeywords(genericTopics[topic] || genericTopics.history, 6),
+  }
+}
+
+function normalizeMicroPracticeContent(content, type, context) {
+  const body = normalizeText(content?.body || '')
+  const fallback = fallbackMicroPracticeContent(type, context)
+  const normalized = {
+    title: normalizeText(content?.title || fallback.title).slice(0, 100) || fallback.title,
+    body: body || fallback.body,
+    transcriptHiddenByDefault: type === 'listening' ? content?.transcriptHiddenByDefault !== false : false,
+    sourceSummary: normalizeText(content?.sourceSummary || context.sourceSummary || fallback.sourceSummary).slice(0, 220),
+    concepts: Array.isArray(content?.concepts) ? content.concepts : fallback.concepts,
+    vocabulary: Array.isArray(content?.vocabulary) ? content.vocabulary : fallback.vocabulary,
+    questions: Array.isArray(content?.questions) ? content.questions : fallback.questions,
+  }
+  normalized.concepts = normalized.concepts.slice(0, 4).map((item) => ({
+    term: normalizeText(item.term).slice(0, 60),
+    simpleEnglish: normalizeText(item.simpleEnglish).slice(0, 180),
+    chinese: normalizeText(item.chinese).slice(0, 120),
+  })).filter((item) => item.term && item.simpleEnglish)
+  normalized.vocabulary = normalized.vocabulary.slice(0, 8).map((item) => ({
+    term: normalizeText(item.term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, '').slice(0, 60),
+    meaningZh: normalizeText(item.meaningZh || fallbackChineseMeaning(item.term)).slice(0, 120),
+    simpleEnglish: normalizeText(item.simpleEnglish || 'A useful word from this practice.').slice(0, 180),
+  })).filter((item) => item.term)
+  normalized.questions = normalized.questions.slice(0, 3).map((question) => {
+    const options = Array.isArray(question.options) ? question.options.map((option) => normalizeText(option).slice(0, 180)).filter(Boolean).slice(0, 4) : []
+    while (options.length < 4) options.push(['Not stated in the text.', 'The opposite idea.', 'A minor detail.', 'A new claim.'][options.length] || 'Not supported.')
+    const answerIndex = Math.max(0, Math.min(options.length - 1, Math.round(Number(question.answerIndex || 0))))
+    return {
+      id: normalizeText(question.id || nanoid()),
+      prompt: normalizeText(question.prompt).slice(0, 220) || 'What is the main idea?',
+      options,
+      answerIndex,
+      explanationZh: normalizeText(question.explanationZh || '答案可以从材料中直接找到。').slice(0, 220),
+      relatedTerms: (Array.isArray(question.relatedTerms) ? question.relatedTerms : [])
+        .map((term) => normalizeText(term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, '').slice(0, 60))
+        .filter(Boolean)
+        .slice(0, 4),
+    }
+  })
+  if (!normalized.questions.length) normalized.questions = fallback.questions
+  return normalized
+}
+
+async function generateMicroPracticeWithOpenAI(type, difficulty, context) {
+  const provider = process.env.AI_PROVIDER || 'auto'
+  const apiKey = process.env.OPENAI_API_KEY
+  if (provider === 'mock' || !apiKey) return null
+
+  const model = process.env.OPENAI_MODEL || 'gpt-5.5'
+  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  const isListening = type === 'listening'
+  const fidelityRules =
+    context.sourceMode === 'book'
+      ? '- The practice must be strictly based on the provided book source context. Do not add external facts, examples, opinions, dates, or causal claims.\n- If the source context is thin, make a simpler practice instead of inventing details.'
+      : context.sourceMode === 'vocabulary'
+        ? '- Use the weak vocabulary naturally and accurately. Keep the topic adult and concrete.'
+        : '- Use reliable general knowledge, but keep the language simple and avoid controversial unsupported claims.'
+
+  const response = await fetch(`${baseUrl}/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      store: false,
+      reasoning: { effort: process.env.OPENAI_REASONING_EFFORT || 'medium' },
+      instructions: 'You create short English micro-practice packages for a Chinese-speaking adult learner. Return only schema-valid JSON.',
+      input: `
+Create one ${isListening ? 'listening' : 'reading'} micro-practice for a busy adult English learner.
+
+Rules:
+- Target level: CEFR ${difficulty}.
+- UI language is Chinese, but the learning material must be English.
+- ${isListening ? 'Write one natural TTS script, about 80-120 words, for 30-60 seconds of normal-speed listening.' : 'Write one short reading text, about 100-150 words.'}
+- Include 2-3 multiple-choice comprehension questions with exactly 4 options.
+- Include 4-7 vocabulary items and 1-3 simple concept previews.
+- relatedTerms should list vocabulary/concepts connected to each question, especially for wrong-answer review.
+${fidelityRules}
+
+Topic: ${context.topicLabel}
+Source summary: ${context.sourceSummary}
+Key terms: ${(context.keyTerms || []).join(', ') || 'none'}
+
+Source context:
+${takeWords(context.sourceContext || '', 1200)}
+`,
+      text: {
+        verbosity: process.env.OPENAI_VERBOSITY || 'medium',
+        format: {
+          type: 'json_schema',
+          name: 'micro_practice',
+          strict: true,
+          schema: microPracticeSchema,
+        },
+      },
+    }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`每日轻练生成失败：${response.status} ${text.slice(0, 240)}`)
+  }
+  const output = getResponsesOutputText(await response.json())
+  if (!output) throw new Error('AI 未返回每日轻练内容')
+  return JSON.parse(output)
+}
+
+function fallbackMicroPracticeContent(type, context) {
+  const sourceSentences = splitSentences(context.sourceContext || context.sourceSummary || '')
+  const terms = (context.keyTerms || []).filter(Boolean).slice(0, 6)
+  const baseSentences = sourceSentences.length
+    ? sourceSentences.slice(0, type === 'listening' ? 5 : 7)
+    : [
+        `${context.topicLabel} can be studied through small, clear examples.`,
+        'A short practice should focus on one idea, not on too many details.',
+        'The learner can notice key words, answer simple questions, and return to the main reading later.',
+      ]
+  const body = takeWords(baseSentences.join(' '), type === 'listening' ? 105 : 145)
+  const vocabulary = (terms.length ? terms : extractKeywords(body, 5)).slice(0, 6).map((term) => ({
+    term,
+    meaningZh: fallbackChineseMeaning(term),
+    simpleEnglish: `A useful word for this topic: ${term}.`,
+  }))
+  const concepts = vocabulary.slice(0, 3).map((item) => ({
+    term: item.term,
+    simpleEnglish: item.simpleEnglish,
+    chinese: item.meaningZh,
+  }))
+  const answer = takeWords(baseSentences[0] || body, 20)
+  return {
+    title: type === 'listening' ? 'Short Listening Practice' : 'Short Reading Practice',
+    body,
+    transcriptHiddenByDefault: type === 'listening',
+    sourceSummary: context.sourceSummary || context.topicLabel,
+    concepts,
+    vocabulary,
+    questions: [
+      {
+        id: nanoid(),
+        prompt: 'What is the main focus of this practice?',
+        options: [answer, 'A completely unrelated topic.', 'A list of grammar rules only.', 'A plan to stop reading.'],
+        answerIndex: 0,
+        explanationZh: '正确选项概括了材料里的主要内容。',
+        relatedTerms: vocabulary.slice(0, 2).map((item) => item.term),
+      },
+      {
+        id: nanoid(),
+        prompt: 'What should the learner notice?',
+        options: ['Key words and the main idea.', 'Only the longest sentence.', 'Only the Chinese translation.', 'Facts not in the material.'],
+        answerIndex: 0,
+        explanationZh: '轻练的目标是抓住主旨和关键词。',
+        relatedTerms: vocabulary.slice(2, 4).map((item) => item.term),
+      },
+    ],
+  }
+}
+
+async function buildMicroPractice(db, userId, body = {}) {
+  const settings = userSettings(db, userId)
+  const type = resolveMicroPracticeType(settings, body)
+  const difficulty = resolveMicroDifficulty(settings, body)
+  const context = buildMicroPracticeContext(db, userId, settings, body)
+  let rawContent = null
+  let aiError = ''
+  try {
+    rawContent = await generateMicroPracticeWithOpenAI(type, difficulty, context)
+  } catch (error) {
+    aiError = error.message || String(error)
+  }
+  const content = normalizeMicroPracticeContent(rawContent || fallbackMicroPracticeContent(type, context), type, context)
+  if (aiError) {
+    content.sourceSummary = `${content.sourceSummary}；AI 生成失败，使用本地兜底。`
+  }
+  return {
+    id: nanoid(),
+    userId,
+    type,
+    typeLabel: microPracticeTypeLabel(type),
+    topic: context.topic,
+    topicLabel: context.topicLabel,
+    difficulty,
+    sourceMode: context.sourceMode,
+    sourceBookId: context.sourceBookId,
+    sourceBookTitle: context.sourceBookTitle,
+    sourceSummary: content.sourceSummary,
+    keyTerms: context.keyTerms || [],
+    content,
+    audio: null,
+    status: 'ready',
+    generatedBy: rawContent ? 'ai' : 'fallback',
+    error: aiError,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function publicMicroPractice(practice) {
+  if (!practice) return null
+  return {
+    id: practice.id,
+    type: practice.type,
+    typeLabel: practice.typeLabel || microPracticeTypeLabel(practice.type),
+    topic: practice.topic,
+    topicLabel: practice.topicLabel,
+    difficulty: practice.difficulty,
+    sourceMode: practice.sourceMode,
+    sourceBookId: practice.sourceBookId || '',
+    sourceBookTitle: practice.sourceBookTitle || '',
+    sourceSummary: practice.sourceSummary || practice.content?.sourceSummary || '',
+    keyTerms: practice.keyTerms || [],
+    content: practice.content,
+    audio: practice.audio || null,
+    status: practice.status || 'ready',
+    generatedBy: practice.generatedBy || 'ai',
+    completedAt: practice.completedAt || '',
+    createdAt: practice.createdAt,
+  }
+}
+
+function publicMicroAttempt(attempt) {
+  if (!attempt) return null
+  return {
+    id: attempt.id,
+    practiceId: attempt.practiceId,
+    type: attempt.type,
+    topicLabel: attempt.topicLabel,
+    difficulty: attempt.difficulty,
+    correctCount: attempt.correctCount,
+    questionCount: attempt.questionCount,
+    correctRate: attempt.correctRate,
+    studyMinutes: attempt.studyMinutes,
+    savedVocabularyCount: attempt.savedVocabularyCount,
+    wrongQuestions: attempt.wrongQuestions || [],
+    suggestion: attempt.suggestion || '',
+    createdAt: attempt.createdAt,
+  }
+}
+
+function microPracticeSuggestion(correctRate, type, difficulty) {
+  const levels = type === 'listening' ? listeningLevels : readingLevels
+  const normalized = normalizeLevel(levels, difficulty, type === 'listening' ? 'A2' : 'A2+')
+  const next = shiftLevel(levels, normalized, 1)
+  const previous = shiftLevel(levels, normalized, -1)
+  if (correctRate >= 0.85) return `${type === 'listening' ? '听力' : '阅读'}正确率不错。下一次可以继续 ${normalized}，如果连续几次都轻松，可以试试 ${next}。`
+  if (correctRate < 0.55) return `这次偏难。下一次建议先用 ${previous}，或者选择最近书籍/薄弱生词这种更熟悉的主题。`
+  return `难度基本合适。保持短频快的节奏，比一次学很久更容易坚持。`
+}
+
+function saveMicroVocabularyFromAttempt(db, userId, practice, wrongQuestions, savedTerms = []) {
+  const contentVocabulary = practice.content?.vocabulary || []
+  const related = wrongQuestions.flatMap((question) => question.relatedTerms || [])
+  const fallbackTerms = wrongQuestions.length ? contentVocabulary.slice(0, 4).map((item) => item.term) : []
+  const terms = [...new Set([...savedTerms, ...related, ...fallbackTerms])]
+    .map((term) => normalizeText(term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, ''))
+    .filter((term) => /^[A-Za-z][A-Za-z'-]*$/.test(term))
+    .slice(0, 6)
+  const now = new Date().toISOString()
+  let savedCount = 0
+  for (const term of terms) {
+    const detail = contentVocabulary.find((item) => item.term.toLowerCase() === term.toLowerCase())
+    const existing = db.vocabulary.find((item) => item.userId === userId && item.term.toLowerCase() === term.toLowerCase())
+    if (existing) {
+      existing.seenCount = Number(existing.seenCount || 0) + 1
+      existing.lastSeenAt = now
+      existing.dueAt = existing.dueAt || now
+      existing.wrongQuestionCount = Number(existing.wrongQuestionCount || 0) + wrongQuestions.length
+    } else {
+      db.vocabulary.push({
+        id: nanoid(),
+        userId,
+        term,
+        meaningZh: detail?.meaningZh || fallbackChineseMeaning(term),
+        simpleEnglish: detail?.simpleEnglish || 'A useful word from a daily micro practice.',
+        exampleSentence: exampleSentenceFromText(practice.content?.body || '', term),
+        wrongQuestionCount: wrongQuestions.length,
+        sourceBookTitle: practice.sourceBookTitle || '每日轻练',
+        seenCount: 1,
+        mastery: 0,
+        createdAt: now,
+        lastSeenAt: now,
+        dueAt: now,
+      })
+    }
+    savedCount += 1
+  }
+  return savedCount
+}
+
+function exampleSentenceFromText(text, term) {
+  const lower = String(term || '').toLowerCase()
+  return splitSentences(text).find((sentence) => sentence.toLowerCase().includes(lower)) || ''
 }
 
 const paragraphRepairSchema = {
@@ -5899,6 +6506,18 @@ async function createApp() {
       books,
       vocabulary: db.vocabulary.filter((item) => item.userId === req.user.id),
       reports: db.reports.filter((item) => item.userId === req.user.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      micro: {
+        recentPractices: (db.microPractices || [])
+          .filter((item) => item.userId === req.user.id)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .slice(0, 8)
+          .map(publicMicroPractice),
+        recentAttempts: (db.microAttempts || [])
+          .filter((item) => item.userId === req.user.id)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .slice(0, 12)
+          .map(publicMicroAttempt),
+      },
       stats: computeStats(db, req.user.id),
     })
   })
@@ -5906,7 +6525,23 @@ async function createApp() {
   app.patch('/api/settings', auth, async (req, res) => {
     const db = req.db
     const settings = userSettings(db, req.user.id)
-    const allowed = ['readingLevel', 'listeningLevel', 'studyMinutes', 'chineseAssist', 'aiSuggestions', 'focusStudyMode', 'keepSourceFiles', 'podcastLexile', 'podcastVoice']
+    const allowed = [
+      'readingLevel',
+      'listeningLevel',
+      'studyMinutes',
+      'chineseAssist',
+      'aiSuggestions',
+      'focusStudyMode',
+      'keepSourceFiles',
+      'podcastLexile',
+      'podcastVoice',
+      'microPracticeType',
+      'microPracticeTopic',
+      'microPracticeDifficulty',
+      'microPracticeDailyGoal',
+      'microPracticeMonthlyGoal',
+      'microPracticeCustomTopic',
+    ]
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) settings[key] = req.body[key]
     }
@@ -5914,6 +6549,12 @@ async function createApp() {
     settings.listeningLevel = normalizeLevel(listeningLevels, settings.listeningLevel, 'A2')
     settings.podcastLexile = Math.max(podcastLexileMin, Math.min(podcastLexileMax, Number(settings.podcastLexile || podcastLexileDefault)))
     settings.podcastVoice = String(settings.podcastVoice || 'Kore').trim() || 'Kore'
+    settings.microPracticeType = normalizeMicroPracticeType(settings.microPracticeType, 'random')
+    settings.microPracticeTopic = normalizeMicroPracticeTopic(settings.microPracticeTopic, 'book')
+    settings.microPracticeDifficulty = normalizeLevel([...listeningLevels, ...readingLevels], settings.microPracticeDifficulty, settings.readingLevel)
+    settings.microPracticeDailyGoal = Math.max(0, Math.min(10, Math.round(Number(settings.microPracticeDailyGoal ?? 1))))
+    settings.microPracticeMonthlyGoal = Math.max(0, Math.min(300, Math.round(Number(settings.microPracticeMonthlyGoal ?? 30))))
+    settings.microPracticeCustomTopic = normalizeText(settings.microPracticeCustomTopic).slice(0, 80)
     await writeDb(db)
     res.json({ settings })
   })
@@ -5968,6 +6609,7 @@ async function createApp() {
           definitions: aiRateLimits['define-word'].max,
           audio: aiRateLimits['speech-audio'].max,
           podcasts: aiRateLimits['generate-podcast'].max,
+          microPractices: aiRateLimits['generate-micro-practice'].max,
           serviceTests: aiRateLimits['service-test'].max,
         },
         activeJobs,
@@ -6031,6 +6673,178 @@ async function createApp() {
     db.sessions = db.sessions.filter((session) => session.token === req.token || session.userId !== user.id)
     await writeDb(db)
     res.json({ ok: true })
+  })
+
+  app.get('/api/micro-practices/recent', auth, async (req, res) => {
+    const db = req.db
+    const practices = (db.microPractices || [])
+      .filter((item) => item.userId === req.user.id)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, 20)
+      .map(publicMicroPractice)
+    const attempts = (db.microAttempts || [])
+      .filter((item) => item.userId === req.user.id)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, 20)
+      .map(publicMicroAttempt)
+    res.json({ practices, attempts, stats: computeStats(db, req.user.id) })
+  })
+
+  app.post('/api/micro-practices/generate', auth, async (req, res, next) => {
+    try {
+      if (shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-micro-practice')) return
+      const db = req.db
+      const practice = await buildMicroPractice(db, req.user.id, req.body || {})
+      db.microPractices.push(practice)
+      if (shouldRecordTextAiUsage()) {
+        const source = textAiUsageSource()
+        recordAiUsage(db, {
+          userId: req.user.id,
+          category: 'text',
+          action: 'generate-micro-practice',
+          ...source,
+          inputTokens: estimateTextTokens(JSON.stringify(req.body || {})),
+          outputTokens: estimateTextTokens(JSON.stringify(practice.content || {})),
+          success: practice.generatedBy === 'ai',
+          message: practice.generatedBy === 'ai' ? '' : practice.error || '每日轻练使用本地兜底',
+        })
+      }
+      await writeDb(db)
+      res.json({ practice: publicMicroPractice(practice), stats: computeStats(db, req.user.id) })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post('/api/micro-practices/:practiceId/complete', auth, async (req, res) => {
+    const db = req.db
+    const practice = (db.microPractices || []).find((item) => item.id === req.params.practiceId && item.userId === req.user.id)
+    if (!practice?.content) {
+      res.status(404).json({ error: '未找到这次轻练' })
+      return
+    }
+
+    const answers = req.body.answers || {}
+    const questions = practice.content.questions || []
+    const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
+    const wrongQuestions = questions
+      .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
+      .map((question) => ({
+        id: question.id,
+        prompt: question.prompt,
+        explanationZh: question.explanationZh,
+        relatedTerms: question.relatedTerms || [],
+      }))
+    const correctRate = questions.length ? correctCount / questions.length : 0
+    const savedVocabularyCount = saveMicroVocabularyFromAttempt(db, req.user.id, practice, wrongQuestions, Array.isArray(req.body.savedTerms) ? req.body.savedTerms : [])
+    const elapsedSeconds = Math.max(0, Number(req.body.elapsedSeconds || 0))
+    const fallbackMinutes = practice.type === 'listening' ? 3 : 2
+    const studyMinutes = Math.max(1, Math.min(15, Math.round(elapsedSeconds / 60) || fallbackMinutes))
+    const attempt = {
+      id: nanoid(),
+      userId: req.user.id,
+      practiceId: practice.id,
+      type: practice.type,
+      typeLabel: practice.typeLabel || microPracticeTypeLabel(practice.type),
+      topic: practice.topic,
+      topicLabel: practice.topicLabel,
+      difficulty: practice.difficulty,
+      sourceMode: practice.sourceMode,
+      sourceBookId: practice.sourceBookId || '',
+      sourceBookTitle: practice.sourceBookTitle || '',
+      correctCount,
+      questionCount: questions.length,
+      correctRate,
+      answers,
+      wrongQuestions,
+      savedVocabularyCount,
+      studyMinutes,
+      suggestion: microPracticeSuggestion(correctRate, practice.type, practice.difficulty),
+      createdAt: new Date().toISOString(),
+    }
+    db.microAttempts.push(attempt)
+    practice.status = 'completed'
+    practice.completedAt = attempt.createdAt
+    practice.lastAttemptId = attempt.id
+    practice.updatedAt = attempt.createdAt
+    await writeDb(db)
+    res.json({
+      attempt: publicMicroAttempt(attempt),
+      practice: publicMicroPractice(practice),
+      stats: computeStats(db, req.user.id),
+    })
+  })
+
+  app.get('/api/micro-practices/:practiceId/audio', auth, async (req, res, next) => {
+    try {
+      const db = req.db
+      const practice = (db.microPractices || []).find((item) => item.id === req.params.practiceId && item.userId === req.user.id)
+      if (!practice?.content || practice.type !== 'listening') {
+        res.status(404).json({ error: '未找到可播放的听力轻练' })
+        return
+      }
+
+      const audioUnit = {
+        id: `micro-${practice.id}`,
+        content: {
+          listening: {
+            text: practice.content.body,
+          },
+        },
+        audio: practice.audio || null,
+      }
+      const audioRequest = buildSpeechAudioRequest(audioUnit)
+      const cachedAudio = await hasCachedSpeechAudio(audioRequest)
+      if (!cachedAudio && shouldRateLimitSpeech() && !consumeUserQuota(req, res, 'speech-audio')) return
+      let audio
+      try {
+        audio = await generateSpeechAudio(audioUnit, audioRequest)
+      } catch (error) {
+        if (!cachedAudio) {
+          recordAiUsage(db, {
+            userId: req.user.id,
+            category: 'audio',
+            action: 'micro-practice-audio',
+            provider: audioRequest.ttsProvider,
+            model: audioRequest.model,
+            inputTokens: estimateTextTokens(audioRequest.input),
+            success: false,
+            statusCode: parseStatusCode(error.message),
+            message: error.message || '轻练听力音频生成失败',
+          })
+          await writeDb(db).catch((usageError) => console.error('failed to record ai usage', usageError))
+        }
+        throw error
+      }
+      if (!cachedAudio) {
+        const stat = await fs.stat(audio.audioPath).catch(() => null)
+        recordAiUsage(db, {
+          userId: req.user.id,
+          category: 'audio',
+          action: 'micro-practice-audio',
+          provider: audio.ttsProvider,
+          model: audio.model,
+          inputTokens: estimateTextTokens(audio.input),
+          audioBytes: stat?.size || 0,
+          success: true,
+        })
+      }
+      practice.audio = {
+        model: audio.model,
+        voice: audio.voice,
+        hash: audio.hash,
+        format: audio.outputFormat,
+        generatedAt: practice.audio?.hash === audio.hash ? practice.audio.generatedAt : new Date().toISOString(),
+      }
+      practice.updatedAt = new Date().toISOString()
+      await writeDb(db)
+
+      res.setHeader('Content-Type', audio.contentType)
+      res.setHeader('Cache-Control', 'no-store')
+      res.sendFile(audio.audioPath)
+    } catch (error) {
+      next(error)
+    }
   })
 
   app.post('/api/books/upload', auth, uploadBookFile, async (req, res, next) => {
