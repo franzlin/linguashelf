@@ -349,6 +349,13 @@ function formatMegabytes(bytes) {
   return `${Math.round(bytes / 1024 / 1024)}MB`
 }
 
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes || 0))
+  if (value < 1024) return `${Math.round(value)} B`
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`
+  return `${(value / 1024 / 1024).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)} MB`
+}
+
 function isPdfFile(buffer) {
   return Buffer.isBuffer(buffer) && buffer.subarray(0, 5).toString('ascii') === '%PDF-'
 }
