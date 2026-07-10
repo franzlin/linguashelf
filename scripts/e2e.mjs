@@ -7,7 +7,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { chromium } from 'playwright'
+import { chromium, request as playwrightRequest } from 'playwright'
 import JSZip from 'jszip'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -205,12 +205,13 @@ async function verifyExternalRequestTimeout() {
       body: JSON.stringify({ email: 'timeout-admin@example.com', password: 'timeout-reader-123' }),
     })
     const loginPayload = await login.json()
-    if (!login.ok || !loginPayload.token) throw new Error(`Timeout test login failed: ${JSON.stringify(loginPayload)}`)
+    const timeoutCookie = String(login.headers.get('set-cookie') || '').split(';')[0]
+    if (!login.ok || !timeoutCookie.startsWith('linguashelf_session=')) throw new Error(`Timeout test login failed: ${JSON.stringify(loginPayload)}`)
 
     const startedAt = Date.now()
     const testResponse = await fetch(`${timeoutBaseUrl}/api/ai/services/text-ai/test`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${loginPayload.token}`, 'Content-Type': 'application/json' },
+      headers: { Cookie: timeoutCookie, 'Content-Type': 'application/json' },
       body: '{}',
     })
     const payload = await testResponse.json()
@@ -365,8 +366,13 @@ try {
   await page.locator('input[type="password"]').fill(password)
   await page.locator('button[type="submit"]').click()
   await page.getByRole('heading', { name: '首页' }).waitFor()
-  const token = await page.evaluate(() => localStorage.getItem('linguashelf-token'))
-  if (!token) throw new Error('Login did not persist a session token')
+  const localStorageToken = await page.evaluate(() => localStorage.getItem('linguashelf-token'))
+  if (localStorageToken) throw new Error('Login persisted a session token in localStorage')
+  const sessionCookie = (await page.context().cookies(baseUrl)).find((cookie) => cookie.name === 'linguashelf_session')
+  if (!sessionCookie?.value || !sessionCookie.httpOnly || sessionCookie.sameSite !== 'Strict') {
+    throw new Error(`Login did not create a hardened HttpOnly session cookie: ${JSON.stringify(sessionCookie)}`)
+  }
+  const token = sessionCookie.value
 
   const authDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
   try {
@@ -396,11 +402,14 @@ try {
   } finally {
     legacyDb.close()
   }
-  const legacyLoginResponse = await page.request.post(`${baseUrl}/api/auth/login`, {
+  const legacyApi = await playwrightRequest.newContext({ baseURL: baseUrl })
+  const legacyLoginResponse = await legacyApi.post('/api/auth/login', {
     data: { email: 'legacy@example.com', password: legacyPassword },
   })
   const legacyLoginPayload = await legacyLoginResponse.json()
-  if (!legacyLoginResponse.ok() || !legacyLoginPayload.token) throw new Error(`Legacy password login failed: ${JSON.stringify(legacyLoginPayload)}`)
+  const legacySessionCookie = (await legacyApi.storageState()).cookies.find((cookie) => cookie.name === 'linguashelf_session')
+  if (!legacyLoginResponse.ok() || !legacySessionCookie?.value) throw new Error(`Legacy password login failed: ${JSON.stringify(legacyLoginPayload)}`)
+  await legacyApi.dispose()
   const upgradedDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
   try {
     const upgradedUser = JSON.parse(upgradedDb.prepare("SELECT payload FROM records WHERE collection='users' AND id=?").get(legacyUserId).payload)
@@ -408,12 +417,24 @@ try {
       upgradedDb.prepare("SELECT payload FROM records WHERE collection='sessions' AND payload LIKE ? ORDER BY updatedAt DESC LIMIT 1").get(`%${legacyUserId}%`).payload
     )
     if (!String(upgradedUser.passwordHash || '').startsWith('pbkdf2-sha256$600000$')) throw new Error('Legacy password hash was not upgraded on login')
-    if (upgradedSession.token || upgradedSession.tokenHash !== crypto.createHash('sha256').update(legacyLoginPayload.token).digest('hex')) {
+    if (upgradedSession.token || upgradedSession.tokenHash !== crypto.createHash('sha256').update(legacySessionCookie.value).digest('hex')) {
       throw new Error('Legacy-user session was not stored as a token hash')
     }
   } finally {
     upgradedDb.close()
   }
+
+  const migrationContext = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  await migrationContext.addInitScript((legacyToken) => {
+    localStorage.setItem('linguashelf-token', legacyToken)
+  }, legacySessionCookie.value)
+  const migrationPage = await migrationContext.newPage()
+  await migrationPage.goto(baseUrl, { waitUntil: 'networkidle' })
+  await migrationPage.getByRole('heading', { name: '首页' }).waitFor()
+  const migratedLocalToken = await migrationPage.evaluate(() => localStorage.getItem('linguashelf-token'))
+  const migratedCookie = (await migrationContext.cookies(baseUrl)).find((cookie) => cookie.name === 'linguashelf_session')
+  if (migratedLocalToken || !migratedCookie?.httpOnly) throw new Error('Legacy localStorage session was not migrated to an HttpOnly cookie')
+  await migrationContext.close()
 
   const readyResponse = await page.request.get(`${baseUrl}/api/ready`)
   const readyPayload = await readyResponse.json()

@@ -867,17 +867,24 @@ function isAndroidBrowser() {
 }
 
 const tokenKey = 'linguashelf-token'
+const cookieSessionToken = 'cookie-session'
 
 async function requestJson<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (token && token !== cookieSessionToken) headers.set('Authorization', `Bearer ${token}`)
 
-  const response = await fetch(path, { ...options, headers })
+  const response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
   const text = await response.text()
   const payload = text ? JSON.parse(text) : {}
   if (!response.ok) throw new Error(payload.error || '请求失败')
   return payload as T
+}
+
+function sessionFetch(path: string, token: string, options: RequestInit = {}) {
+  const headers = new Headers(options.headers)
+  if (token && token !== cookieSessionToken) headers.set('Authorization', `Bearer ${token}`)
+  return fetch(path, { ...options, headers, credentials: 'same-origin' })
 }
 
 function formatPercent(value: number) {
@@ -1097,14 +1104,14 @@ function fallbackMeaning(word: string) {
 }
 
 export function App() {
-  const [token, setToken] = useState(() => localStorage.getItem(tokenKey) || '')
+  const [token, setToken] = useState(() => localStorage.getItem(tokenKey) || cookieSessionToken)
   const [data, setData] = useState<AppData | null>(null)
   const [view, setView] = useState<View>('home')
   const [selectedBook, setSelectedBook] = useState<Book | null>(null)
   const [bookUnits, setBookUnits] = useState<Unit[]>([])
   const [selectedUnit, setSelectedUnit] = useState<Unit | null>(null)
   const [latestReport, setLatestReport] = useState<Report | null>(null)
-  const [loading, setLoading] = useState(Boolean(token))
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const jobWatchAbortRef = useRef<AbortController | null>(null)
@@ -1118,6 +1125,10 @@ export function App() {
       const next = await requestJson<AppData>('/api/app', activeToken)
       setData(next)
       setError('')
+      if (activeToken !== cookieSessionToken) {
+        localStorage.removeItem(tokenKey)
+        setToken(cookieSessionToken)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败')
       localStorage.removeItem(tokenKey)
@@ -1382,9 +1393,9 @@ export function App() {
   if (!token) {
     return (
       <LoginScreen
-        onLogin={(nextToken, nextData) => {
-          localStorage.setItem(tokenKey, nextToken)
-          setToken(nextToken)
+        onLogin={(nextData) => {
+          localStorage.removeItem(tokenKey)
+          setToken(cookieSessionToken)
           setData(nextData)
           setView('home')
         }}
@@ -1566,9 +1577,9 @@ export function App() {
   )
 }
 
-function LoginScreen({ onLogin }: { onLogin: (token: string, data: AppData) => void }) {
-  const [email, setEmail] = useState('me@example.com')
-  const [password, setPassword] = useState('reader123')
+function LoginScreen({ onLogin }: { onLogin: (data: AppData) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [inviteCode, setInviteCode] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1577,12 +1588,12 @@ function LoginScreen({ onLogin }: { onLogin: (token: string, data: AppData) => v
     event.preventDefault()
     setBusy(true)
     try {
-      const auth = await requestJson<{ token: string }>('/api/auth/login', '', {
+      await requestJson('/api/auth/login', '', {
         method: 'POST',
         body: JSON.stringify({ email, password, inviteCode }),
       })
-      const data = await requestJson<AppData>('/api/app', auth.token)
-      onLogin(auth.token, data)
+      const data = await requestJson<AppData>('/api/app', cookieSessionToken)
+      onLogin(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
     } finally {
@@ -2548,8 +2559,7 @@ function BookView({
     if (audioUrls[podcast.id]) return
     setLoadingAudioId(podcast.id)
     try {
-      const response = await fetch(`/api/podcasts/${podcast.id}/audio?t=${Date.now()}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await sessionFetch(`/api/podcasts/${podcast.id}/audio?t=${Date.now()}`, token, {
         cache: 'no-store',
       })
       if (!response.ok) throw new Error('音频还不可用')
@@ -2568,8 +2578,7 @@ function BookView({
   async function downloadPodcastAudio(podcast: Podcast) {
     setDownloadingId(podcast.id)
     try {
-      const response = await fetch(`/api/podcasts/${podcast.id}/audio?download=1&t=${Date.now()}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await sessionFetch(`/api/podcasts/${podcast.id}/audio?download=1&t=${Date.now()}`, token, {
         cache: 'no-store',
       })
       if (!response.ok) throw new Error('音频还不可下载')
@@ -3379,8 +3388,7 @@ function StudyView({
 
     setAudioLoading(true)
     try {
-      const response = await fetch(`/api/units/${unit.id}/audio?t=${Date.now()}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await sessionFetch(`/api/units/${unit.id}/audio?t=${Date.now()}`, token, {
         cache: 'no-store',
       })
       if (!response.ok) throw new Error('audio unavailable')
@@ -4089,9 +4097,7 @@ function MicroPracticeView({
 
     setAudioLoading(true)
     try {
-      const response = await fetch(`/api/micro-practices/${current.id}/audio?t=${Date.now()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const response = await sessionFetch(`/api/micro-practices/${current.id}/audio?t=${Date.now()}`, token)
       if (!response.ok) throw new Error('音频生成失败')
       const blob = await response.blob()
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
@@ -5165,9 +5171,7 @@ function VocabularyView({
   }
 
   async function exportVocabulary() {
-    const response = await fetch('/api/vocabulary/export', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    const response = await sessionFetch('/api/vocabulary/export', token)
     if (!response.ok) return
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)

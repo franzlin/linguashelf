@@ -29,6 +29,7 @@ const port = Number(process.env.PORT || 5173)
 const signupInviteCode = String(process.env.SIGNUP_INVITE_CODE || '')
 const allowSignup = parseBoolean(process.env.ALLOW_SIGNUP, false)
 const sessionDays = Number(process.env.SESSION_DAYS || 30)
+const sessionCookieName = 'linguashelf_session'
 const loginWindowMs = Number(process.env.LOGIN_WINDOW_MINUTES || 10) * 60 * 1000
 const loginMaxFailures = Number(process.env.LOGIN_MAX_FAILURES || 8)
 const passwordMinLength = Math.max(8, Number(process.env.PASSWORD_MIN_LENGTH || 8))
@@ -610,6 +611,47 @@ function hashSessionToken(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex')
 }
 
+function requestCookie(req, name) {
+  const header = String(req.headers.cookie || '')
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0) continue
+    const key = part.slice(0, separator).trim()
+    if (key !== name) continue
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim())
+    } catch {
+      return ''
+    }
+  }
+  return ''
+}
+
+function secureRequest(req) {
+  return Boolean(req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
+}
+
+function setSessionCookie(req, res, token, expiresAt) {
+  const expiresAtMs = Date.parse(expiresAt || '')
+  const maxAge = Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : sessionDays * 24 * 60 * 60 * 1000
+  res.cookie(sessionCookieName, token, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: secureRequest(req),
+    path: '/',
+    maxAge,
+  })
+}
+
+function clearSessionCookie(req, res) {
+  res.clearCookie(sessionCookieName, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: secureRequest(req),
+    path: '/',
+  })
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -630,7 +672,9 @@ function requireAdmin(req, res, next) {
 
 async function auth(req, res, next) {
   const header = req.headers.authorization || ''
-  const token = header.startsWith('Bearer ') ? header.slice(7) : ''
+  const bearerToken = header.startsWith('Bearer ') ? header.slice(7) : ''
+  const cookieToken = requestCookie(req, sessionCookieName)
+  const token = cookieToken || bearerToken
   if (!token) {
     res.status(401).json({ error: '需要登录' })
     return
@@ -641,12 +685,14 @@ async function auth(req, res, next) {
   const session = db.sessions.find((item) => item.tokenHash === tokenHash || item.token === token)
   const user = session ? db.users.find((item) => item.id === session.userId) : null
   if (!session || !user) {
+    if (cookieToken) clearSessionCookie(req, res)
     res.status(401).json({ error: '登录已失效' })
     return
   }
   if (isSessionExpired(session)) {
     db.sessions = db.sessions.filter((item) => item !== session)
     await writeDb(db)
+    clearSessionCookie(req, res)
     res.status(401).json({ error: '登录已过期，请重新登录' })
     return
   }
@@ -656,6 +702,7 @@ async function auth(req, res, next) {
     delete session.token
     await writeDb(db)
   }
+  if (!cookieToken) setSessionCookie(req, res, token, session.expiresAt)
 
   req.user = user
   req.sessionTokenHash = tokenHash
@@ -6912,7 +6959,8 @@ async function createApp() {
     db.sessions.push({ tokenHash: hashSessionToken(token), userId: user.id, createdAt, expiresAt })
     await writeDb(db)
     clearLoginFailures(limit.key)
-    res.json({ token, user: publicUser(user), settings: userSettings(db, user.id) })
+    setSessionCookie(req, res, token, expiresAt)
+    res.json({ user: publicUser(user), settings: userSettings(db, user.id) })
   })
 
   app.get('/api/app', auth, async (req, res) => {
@@ -8341,6 +8389,7 @@ async function createApp() {
     const db = req.db
     db.sessions = db.sessions.filter((item) => item.tokenHash !== req.sessionTokenHash)
     await writeDb(db)
+    clearSessionCookie(req, res)
     res.json({ ok: true })
   })
 

@@ -224,7 +224,7 @@ LOGIN_WINDOW_MINUTES=10
 LOGIN_MAX_FAILURES=8
 ```
 
-服务器只保存会话 token 的 SHA-256 哈希；旧版本明文会话会在首次成功鉴权时自动迁移。旧的 10 万次 PBKDF2 密码哈希也会在下一次成功登录时自动升级。
+浏览器会话使用 `HttpOnly`、`SameSite=Strict` Cookie，JavaScript 无法读取；服务器只保存会话 token 的 SHA-256 哈希。旧版本 `localStorage` token 会在首次成功鉴权时换成 Cookie 并自动清理，旧版明文数据库会话也会同步迁移。旧的 10 万次 PBKDF2 密码哈希会在下一次成功登录时自动升级。
 
 上传和 OCR 保护：
 
