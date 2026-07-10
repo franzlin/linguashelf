@@ -85,6 +85,27 @@ async function makeEpub() {
   return file
 }
 
+function makeSilentWav(durationMs = 3000) {
+  const sampleRate = 24000
+  const samples = Math.max(1, Math.round((sampleRate * durationMs) / 1000))
+  const pcmBytes = samples * 2
+  const wav = Buffer.alloc(44 + pcmBytes)
+  wav.write('RIFF', 0)
+  wav.writeUInt32LE(36 + pcmBytes, 4)
+  wav.write('WAVE', 8)
+  wav.write('fmt ', 12)
+  wav.writeUInt32LE(16, 16)
+  wav.writeUInt16LE(1, 20)
+  wav.writeUInt16LE(1, 22)
+  wav.writeUInt32LE(sampleRate, 24)
+  wav.writeUInt32LE(sampleRate * 2, 28)
+  wav.writeUInt16LE(2, 32)
+  wav.writeUInt16LE(16, 34)
+  wav.write('data', 36)
+  wav.writeUInt32LE(pcmBytes, 40)
+  return wav
+}
+
 function upsert(db, collection, id, payload) {
   db.prepare(
     `INSERT INTO records (collection, id, payload, updatedAt)
@@ -189,6 +210,25 @@ try {
   await page.locator('input[type="password"]').fill(password)
   await page.locator('button[type="submit"]').click()
   await page.getByRole('heading', { name: '首页' }).waitFor()
+  const token = await page.evaluate(() => localStorage.getItem('linguashelf-token'))
+  if (!token) throw new Error('Login did not persist a session token')
+
+  const zeroGoalResponse = await page.request.patch(`${baseUrl}/api/settings`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { microPracticeDailyGoal: 0, microPracticeMonthlyGoal: 0 },
+  })
+  if (!zeroGoalResponse.ok()) throw new Error(`Setting zero micro goals failed with HTTP ${zeroGoalResponse.status()}`)
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+  await page.getByText('今日 0/0 次').waitFor()
+  if (await page.getByText('轻练目标已完成。').count()) throw new Error('A disabled micro goal was incorrectly shown as completed')
+  const restoreGoalResponse = await page.request.patch(`${baseUrl}/api/settings`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { microPracticeDailyGoal: 1, microPracticeMonthlyGoal: 30 },
+  })
+  if (!restoreGoalResponse.ok()) throw new Error(`Restoring micro goals failed with HTTP ${restoreGoalResponse.status()}`)
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
 
   await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
   await page.getByRole('heading', { name: '我的书库' }).waitFor()
@@ -216,7 +256,7 @@ try {
     throw new Error(`Expected at least 2 micro-practice questions, found ${microQuestionCount}`)
   }
   for (let index = 0; index < microQuestionCount; index += 1) {
-    await microQuestions.nth(index).locator('.options-grid button').first().click()
+    await microQuestions.nth(index).locator('.options-grid button').nth(index === 0 ? 1 : 0).click()
   }
   const microCompleteResponsePromise = page.waitForResponse((response) => response.url().includes('/api/micro-practices/') && response.url().includes('/complete'))
   await page.getByRole('button', { name: '提交答案' }).click()
@@ -228,6 +268,9 @@ try {
   if (!microCompletePayload.attempt || !microCompletePayload.practice) {
     throw new Error(`Micro practice complete returned unexpected payload: ${JSON.stringify(microCompletePayload)}`)
   }
+  if (microCompletePayload.attempt.savedVocabularyCount !== 2) {
+    throw new Error(`Expected the single wrong answer to link 2 related terms, got ${microCompletePayload.attempt.savedVocabularyCount}`)
+  }
   await page.waitForTimeout(750)
   if (!(await page.locator('.completion-overlay').count())) {
     const bodyText = (await page.locator('body').innerText()).slice(0, 2000)
@@ -237,6 +280,87 @@ try {
   await page.getByText('关联生词').waitFor()
   await page.screenshot({ path: path.join(screenshotDir, 'micro-practice-completed.png'), fullPage: true })
   await page.getByRole('button', { name: '查看详情' }).click()
+  const recommendationCard = page.locator('.micro-side .page-section').filter({ hasText: '今日推荐' }).first()
+  await recommendationCard.getByRole('heading', { name: '近期生词' }).waitFor()
+
+  const duplicateCompleteResponse = await page.request.post(`${baseUrl}/api/micro-practices/${microCompletePayload.practice.id}/complete`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { answers: {}, elapsedSeconds: 1 },
+  })
+  if (!duplicateCompleteResponse.ok()) throw new Error(`Duplicate completion returned HTTP ${duplicateCompleteResponse.status()}`)
+  const duplicateCompletePayload = await duplicateCompleteResponse.json()
+  if (!duplicateCompletePayload.duplicate || duplicateCompletePayload.attempt.id !== microCompletePayload.attempt.id) {
+    throw new Error(`Duplicate completion was not idempotent: ${JSON.stringify(duplicateCompletePayload)}`)
+  }
+  const microAfterDuplicate = await page.request.get(`${baseUrl}/api/micro-practices/recent`, { headers: { Authorization: `Bearer ${token}` } })
+  const microAfterDuplicatePayload = await microAfterDuplicate.json()
+  if (microAfterDuplicatePayload.stats.microPracticeCount !== 1 || microAfterDuplicatePayload.stats.todayMicroPractices !== 1) {
+    throw new Error(`Duplicate completion changed stats: ${JSON.stringify(microAfterDuplicatePayload.stats)}`)
+  }
+  const appAfterWrongAnswer = await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })
+  const appAfterWrongAnswerPayload = await appAfterWrongAnswer.json()
+  if (appAfterWrongAnswerPayload.vocabulary.some((item) => Number(item.wrongQuestionCount || 0) > 1)) {
+    throw new Error(`Wrong-question counts were over-incremented: ${JSON.stringify(appAfterWrongAnswerPayload.vocabulary)}`)
+  }
+
+  await page.route('**/api/micro-practices/*/audio*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'audio/wav', body: makeSilentWav() })
+  })
+  await page.getByRole('button', { name: '听力轻练' }).click()
+  const firstListeningResponsePromise = page.waitForResponse((response) => response.url().endsWith('/api/micro-practices/generate') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '开始新轻练' }).click()
+  const firstListeningPayload = await (await firstListeningResponsePromise).json()
+  const secondListeningResponsePromise = page.waitForResponse((response) => response.url().endsWith('/api/micro-practices/generate') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '开始新轻练' }).click()
+  const secondListeningPayload = await (await secondListeningResponsePromise).json()
+  const secondAudioRequestPromise = page.waitForRequest((request) => request.url().includes(`/api/micro-practices/${secondListeningPayload.practice.id}/audio`))
+  await page.getByRole('button', { name: '播放' }).click()
+  await secondAudioRequestPromise
+  await page.getByRole('button', { name: '暂停' }).click()
+  const listeningHistory = page.locator('.micro-practice-list button').filter({ hasText: 'Short Listening Practice' })
+  if ((await listeningHistory.count()) < 2) throw new Error('Expected two listening practices in recent history')
+  await listeningHistory.nth(1).click()
+  if (await page.locator('.micro-listening .podcast-audio').count()) throw new Error('Switching practices did not clear the previous audio URL')
+  const firstAudioRequestPromise = page.waitForRequest((request) => request.url().includes(`/api/micro-practices/${firstListeningPayload.practice.id}/audio`))
+  await page.getByRole('button', { name: '播放' }).click()
+  await firstAudioRequestPromise
+
+  const personalizedResponse = await page.request.post(`${baseUrl}/api/micro-practices/generate`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { type: 'reading', topic: 'weak-vocabulary', difficulty: 'A2' },
+  })
+  if (!personalizedResponse.ok()) throw new Error(`Recent-vocabulary generation returned HTTP ${personalizedResponse.status()}`)
+  const personalizedPayload = await personalizedResponse.json()
+  if (personalizedPayload.practice.sourceMode !== 'vocabulary' || personalizedPayload.practice.topicLabel !== '近期生词') {
+    throw new Error(`Recent-vocabulary generation used the wrong source: ${JSON.stringify(personalizedPayload.practice)}`)
+  }
+
+  const concurrentPracticeResponse = await page.request.post(`${baseUrl}/api/micro-practices/generate`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { type: 'reading', topic: 'history', difficulty: 'A2' },
+  })
+  const concurrentPracticePayload = await concurrentPracticeResponse.json()
+  const concurrentAnswers = Object.fromEntries(
+    concurrentPracticePayload.practice.content.questions.map((question) => [question.id, question.answerIndex])
+  )
+  const concurrentCompleteOptions = {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { answers: concurrentAnswers, elapsedSeconds: 60 },
+  }
+  const [concurrentFirstResponse, concurrentSecondResponse] = await Promise.all([
+    page.request.post(`${baseUrl}/api/micro-practices/${concurrentPracticePayload.practice.id}/complete`, concurrentCompleteOptions),
+    page.request.post(`${baseUrl}/api/micro-practices/${concurrentPracticePayload.practice.id}/complete`, concurrentCompleteOptions),
+  ])
+  const [concurrentFirstPayload, concurrentSecondPayload] = await Promise.all([
+    concurrentFirstResponse.json(),
+    concurrentSecondResponse.json(),
+  ])
+  if (concurrentFirstPayload.attempt.id !== concurrentSecondPayload.attempt.id) {
+    throw new Error(`Concurrent completion created different attempts: ${JSON.stringify([concurrentFirstPayload, concurrentSecondPayload])}`)
+  }
+  if ([concurrentFirstPayload.duplicate, concurrentSecondPayload.duplicate].filter(Boolean).length !== 1) {
+    throw new Error(`Concurrent completion did not return one original and one duplicate response`)
+  }
 
   insertFailedPodcastTask()
   await page.getByLabel('主导航').getByRole('button', { name: '任务' }).click()

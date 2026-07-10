@@ -804,7 +804,7 @@ const microPracticeTypeOptions: Array<{ value: MicroPracticeType; label: string 
 ]
 const microPracticeTopicOptions: Array<{ value: MicroPracticeTopic; label: string }> = [
   { value: 'book', label: '最近书籍' },
-  { value: 'weak-vocabulary', label: '薄弱生词' },
+  { value: 'weak-vocabulary', label: '近期生词' },
   { value: 'history', label: '历史' },
   { value: 'politics', label: '政治' },
   { value: 'economics', label: '经济' },
@@ -1662,7 +1662,7 @@ function HomeView({
             <div>
               <span className="eyebrow">每日轻练</span>
               <h2>
-                今日 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal || 1} 次
+                今日 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal ?? 1} 次
               </h2>
               <p>{data.stats.microTodayGoalMet ? '轻练目标已完成。' : '时间紧的时候，做一轮短练习保持手感。'}</p>
             </div>
@@ -1747,7 +1747,7 @@ function HomeView({
         <section className="page-section compact-section">
           <h2>学习节奏</h2>
           <p>今日 {data.stats.todayCompleted || 0}/{data.stats.dailyGoalUnits || 1} 单元</p>
-          <p>轻练 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal || 1} 次</p>
+          <p>轻练 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal ?? 1} 次</p>
           <p>{data.settings.studyMinutes} 分钟 / 单元</p>
           {data.home.latestReport && <p>上次正确率 {formatPercent(data.home.latestReport.correctRate)}</p>}
           <div className="calendar-strip">
@@ -1810,7 +1810,7 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
           </div>
           <div className="dashboard-note">
             <Clock size={16} />
-            今日 {formatNumber(stats.todayStudyMinutes || 0)} / {formatNumber(stats.dailyGoalMinutes || 10)} 分钟 · 轻练 {stats.todayMicroPractices || 0}/{stats.microDailyGoal || 1}
+            今日 {formatNumber(stats.todayStudyMinutes || 0)} / {formatNumber(stats.dailyGoalMinutes || 10)} 分钟 · 轻练 {stats.todayMicroPractices || 0}/{stats.microDailyGoal ?? 1}
           </div>
         </article>
 
@@ -1825,8 +1825,8 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
             </button>
           </div>
           <div className="review-plan-grid">
-            <Stat label="今日完成" value={`${stats.todayMicroPractices || 0}/${stats.microDailyGoal || 1}`} />
-            <Stat label="本月目标" value={`${stats.microMonthPractices || 0}/${stats.microMonthlyGoal || 30}`} />
+            <Stat label="今日完成" value={`${stats.todayMicroPractices || 0}/${stats.microDailyGoal ?? 1}`} />
+            <Stat label="本月目标" value={`${stats.microMonthPractices || 0}/${stats.microMonthlyGoal ?? 30}`} />
             <Stat label="轻练正确率" value={formatPercent(stats.microCorrectRate || 0)} />
             <Stat label="轻练分钟" value={String(stats.microPracticeMinutes || 0)} />
           </div>
@@ -3885,14 +3885,20 @@ function MicroPracticeView({
   const [statsSnapshot, setStatsSnapshot] = useState(stats)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef('')
-  const recommendedTopic: MicroPracticeTopic = books.length ? 'book' : attempts.some((item) => item.correctRate < 0.7) ? 'weak-vocabulary' : 'history'
-  const recommendedLabel = recommendedTopic === 'book' ? '最近书籍' : recommendedTopic === 'weak-vocabulary' ? '薄弱生词' : '历史'
+  const recentLowScore = attempts.slice(0, 3).some((item) => item.correctRate < 0.7)
+  const hasReviewVocabulary = Number(statsSnapshot?.vocabularyCount || 0) > 0
+  const recommendedTopic: MicroPracticeTopic = recentLowScore && hasReviewVocabulary ? 'weak-vocabulary' : books.length ? 'book' : hasReviewVocabulary ? 'weak-vocabulary' : 'history'
+  const recommendedLabel = recommendedTopic === 'book' ? '最近书籍' : recommendedTopic === 'weak-vocabulary' ? '近期生词' : '历史'
+  const microDailyGoal = statsSnapshot?.microDailyGoal ?? 1
+  const microTodayGoalMet = microDailyGoal > 0 && (statsSnapshot?.todayMicroPractices || 0) >= microDailyGoal
   const recommendationText =
-    (statsSnapshot?.todayMicroPractices || 0) >= (statsSnapshot?.microDailyGoal || 1)
-      ? '今日轻练已完成，可以用薄弱项做一轮复盘。'
-      : books.length
-        ? '从最近书籍抽一个短练习，保持阅读主线不断。'
-        : '先用通用历史主题开始，建立每日输入节奏。'
+    microTodayGoalMet
+      ? '今日轻练已完成，可以再用近期生词做一轮复盘。'
+      : recommendedTopic === 'weak-vocabulary'
+        ? '最近的答题说明有些词还不够稳，今天先做一轮生词轻练。'
+        : recommendedTopic === 'book'
+          ? '从最近书籍抽一个短练习，保持阅读主线不断。'
+          : '先用通用历史主题开始，建立每日输入节奏。'
 
   useEffect(() => {
     setPractices(initialPractices)
@@ -3906,7 +3912,9 @@ function MicroPracticeView({
 
   useEffect(() => {
     return () => {
-      audioRef.current?.pause()
+      const audio = audioRef.current
+      audio?.pause()
+      audio?.removeAttribute('src')
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
     }
   }, [])
@@ -3935,11 +3943,7 @@ function MicroPracticeView({
           bookId: topic === 'book' ? bookId : '',
         }),
       })
-      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
-      audioUrlRef.current = ''
-      setAudioUrl('')
-      audioRef.current?.pause()
-      setAudioPlaying(false)
+      resetMicroAudio()
       setCurrent(result.practice)
       setPractices((items) => [result.practice, ...items.filter((item) => item.id !== result.practice.id)].slice(0, 20))
       setAnswers({})
@@ -3956,14 +3960,15 @@ function MicroPracticeView({
 
   async function playAudio() {
     if (!current || current.type !== 'listening') return
-    const existing = audioRef.current
-    if (existing && audioPlaying) {
-      existing.pause()
+    const audio = audioRef.current
+    if (!audio) return
+    if (audioPlaying) {
+      audio.pause()
       setAudioPlaying(false)
       return
     }
-    if (existing?.src) {
-      await existing.play()
+    if (audio.dataset.practiceId === current.id && audio.src) {
+      await audio.play()
       setAudioPlaying(true)
       return
     }
@@ -3979,21 +3984,30 @@ function MicroPracticeView({
       const url = URL.createObjectURL(blob)
       audioUrlRef.current = url
       setAudioUrl(url)
-      const audio = audioRef.current || new Audio()
       audio.preload = 'auto'
       audio.setAttribute('playsinline', 'true')
+      audio.dataset.practiceId = current.id
       audio.src = url
-      audio.onplay = () => setAudioPlaying(true)
-      audio.onpause = () => setAudioPlaying(false)
-      audio.onended = () => setAudioPlaying(false)
-      audio.onerror = () => setAudioPlaying(false)
-      audioRef.current = audio
       await audio.play()
     } catch (err) {
       onError(err instanceof Error ? err.message : '音频播放失败')
     } finally {
       setAudioLoading(false)
     }
+  }
+
+  function resetMicroAudio() {
+    const audio = audioRef.current
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.removeAttribute('data-practice-id')
+      audio.load()
+    }
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+    audioUrlRef.current = ''
+    setAudioUrl('')
+    setAudioPlaying(false)
   }
 
   async function completePractice() {
@@ -4022,7 +4036,7 @@ function MicroPracticeView({
   }
 
   function openPractice(practice: MicroPractice) {
-    audioRef.current?.pause()
+    resetMicroAudio()
     setCurrent(practice)
     setAnswers({})
     setResultAttempt(null)
@@ -4124,7 +4138,17 @@ function MicroPracticeView({
                     {audioLoading ? <Loader2 className="spin" size={18} /> : audioPlaying ? <Pause size={18} /> : <Play size={18} />}
                     {audioLoading ? '生成音频' : audioPlaying ? '暂停' : '播放'}
                   </button>
-                  {audioUrl && <audio className="podcast-audio" src={audioUrl} controls playsInline />}
+                  <audio
+                    ref={audioRef}
+                    className={audioUrl ? 'podcast-audio' : 'audio-anchor'}
+                    src={audioUrl || undefined}
+                    controls={Boolean(audioUrl)}
+                    playsInline
+                    onPlay={() => setAudioPlaying(true)}
+                    onPause={() => setAudioPlaying(false)}
+                    onEnded={() => setAudioPlaying(false)}
+                    onError={() => setAudioPlaying(false)}
+                  />
                   <button className="ghost-button" type="button" onClick={() => setTranscriptVisible((value) => !value)}>
                     <Headphones size={18} />
                     {transcriptVisible ? '隐藏文本' : '显示文本'}

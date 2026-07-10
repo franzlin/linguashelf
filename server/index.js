@@ -88,6 +88,7 @@ const aiRateLimits = {
 const loginAttempts = new Map()
 const actionRateBuckets = new Map()
 const geminiTtsProviderCooldowns = new Map()
+const microCompletionLocks = new Map()
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
 let writeChain = Promise.resolve()
 let activeOcrTasks = 0
@@ -160,6 +161,23 @@ async function writeDb(db) {
   const nextWrite = writeChain.then(write, write)
   writeChain = nextWrite.catch(() => undefined)
   await nextWrite
+}
+
+async function withKeyedLock(lockMap, key, work) {
+  const previous = lockMap.get(key) || Promise.resolve()
+  let release = () => undefined
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const tail = previous.then(() => gate)
+  lockMap.set(key, tail)
+  await previous
+  try {
+    return await work()
+  } finally {
+    release()
+    if (lockMap.get(key) === tail) lockMap.delete(key)
+  }
 }
 
 async function writeJsonSnapshot(db) {
@@ -636,7 +654,7 @@ function normalizeMicroPracticeType(value, fallback = 'random') {
 function normalizeMicroPracticeTopic(value, fallback = 'book') {
   const topic = String(value || '').trim().toLowerCase()
   if (['book', 'recent-book', 'current-book', '书籍主题', '最近书籍'].includes(topic)) return 'book'
-  if (['weak-vocabulary', 'vocabulary', 'words', '薄弱生词', '生词'].includes(topic)) return 'weak-vocabulary'
+  if (['weak-vocabulary', 'vocabulary', 'words', '近期生词', '薄弱生词', '生词'].includes(topic)) return 'weak-vocabulary'
   if (['history', '历史'].includes(topic)) return 'history'
   if (['politics', 'political', '政治'].includes(topic)) return 'politics'
   if (['economics', 'economy', 'economic', '经济'].includes(topic)) return 'economics'
@@ -3645,8 +3663,8 @@ function computeStats(db, userId) {
   const dailyGoalUnits = Math.max(1, Math.round(dailyGoalMinutes / 10))
   const microDailyGoal = Math.max(0, Math.round(Number(settings.microPracticeDailyGoal ?? 1)))
   const microMonthlyGoal = Math.max(0, Math.round(Number(settings.microPracticeMonthlyGoal ?? 30)))
-  const microTodayGoalMet = microDailyGoal === 0 || todayMicroPractices >= microDailyGoal
-  const microMonthGoalMet = microMonthlyGoal === 0 || microMonthPractices >= microMonthlyGoal
+  const microTodayGoalMet = microDailyGoal > 0 && todayMicroPractices >= microDailyGoal
+  const microMonthGoalMet = microMonthlyGoal > 0 && microMonthPractices >= microMonthlyGoal
   const todayGoalMet = todayStudyMinutes >= dailyGoalMinutes || todayCompleted >= dailyGoalUnits || microTodayGoalMet
   const dueTomorrow = vocabulary.filter((item) => {
     const due = Date.parse(item.dueAt || '')
@@ -4454,7 +4472,7 @@ function microPracticeTypeLabel(type) {
 function microTopicLabel(topic) {
   const labels = {
     book: '最近书籍',
-    'weak-vocabulary': '薄弱生词',
+    'weak-vocabulary': '近期生词',
     history: '历史',
     politics: '政治',
     economics: '经济',
@@ -4536,14 +4554,25 @@ function buildMicroPracticeContext(db, userId, settings, body = {}) {
 
   if (topic === 'weak-vocabulary') {
     const now = Date.now()
+    const dayMs = 24 * 60 * 60 * 1000
     const weakItems = vocabulary
-      .filter((item) => Number(item.mastery || 0) <= 2 || !item.dueAt || Date.parse(item.dueAt || '') <= now)
-      .sort((a, b) => Number(a.mastery || 0) - Number(b.mastery || 0))
+      .map((item) => {
+        const mastery = Math.max(0, Number(item.mastery || 0))
+        const lastSeenAt = Date.parse(item.lastSeenAt || item.createdAt || '') || 0
+        const ageDays = lastSeenAt ? Math.max(0, (now - lastSeenAt) / dayMs) : 365
+        const dueAt = Date.parse(item.dueAt || '')
+        const due = !item.dueAt || (Number.isFinite(dueAt) && dueAt <= now)
+        const score = Math.max(0, 45 - ageDays) + Math.max(0, 4 - mastery) * 12 + (due ? 20 : 0)
+        return { item, mastery, lastSeenAt, ageDays, due, score }
+      })
+      .filter(({ mastery, ageDays, due }) => ageDays <= 90 || mastery <= 2 || due)
+      .sort((a, b) => b.score - a.score || b.lastSeenAt - a.lastSeenAt || a.mastery - b.mastery)
       .slice(0, 10)
+      .map(({ item }) => item)
     if (weakItems.length) {
       return {
         topic,
-        topicLabel: '薄弱生词',
+        topicLabel: '近期生词',
         sourceMode: 'vocabulary',
         sourceBookId: '',
         sourceBookTitle: '',
@@ -4835,28 +4864,48 @@ function microPracticeSuggestion(correctRate, type, difficulty) {
   const next = shiftLevel(levels, normalized, 1)
   const previous = shiftLevel(levels, normalized, -1)
   if (correctRate >= 0.85) return `${type === 'listening' ? '听力' : '阅读'}正确率不错。下一次可以继续 ${normalized}，如果连续几次都轻松，可以试试 ${next}。`
-  if (correctRate < 0.55) return `这次偏难。下一次建议先用 ${previous}，或者选择最近书籍/薄弱生词这种更熟悉的主题。`
+  if (correctRate < 0.55) return `这次偏难。下一次建议先用 ${previous}，或者选择最近书籍/近期生词这种更熟悉的主题。`
   return `难度基本合适。保持短频快的节奏，比一次学很久更容易坚持。`
 }
 
 function saveMicroVocabularyFromAttempt(db, userId, practice, wrongQuestions, savedTerms = []) {
   const contentVocabulary = practice.content?.vocabulary || []
-  const related = wrongQuestions.flatMap((question) => question.relatedTerms || [])
-  const fallbackTerms = wrongQuestions.length ? contentVocabulary.slice(0, 4).map((item) => item.term) : []
-  const terms = [...new Set([...savedTerms, ...related, ...fallbackTerms])]
-    .map((term) => normalizeText(term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, ''))
-    .filter((term) => /^[A-Za-z][A-Za-z'-]*$/.test(term))
-    .slice(0, 6)
+  const wrongCountByTerm = new Map()
+  const normalizeTerm = (term) => normalizeText(term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, '')
+  for (const question of wrongQuestions) {
+    const explicit = (question.relatedTerms || []).map(normalizeTerm).filter((term) => /^[A-Za-z][A-Za-z'-]*$/.test(term))
+    const questionText = `${question.prompt || ''} ${question.explanationZh || ''}`.toLowerCase()
+    const inferred = explicit.length
+      ? []
+      : contentVocabulary
+          .map((item) => normalizeTerm(item.term))
+          .filter((term) => term && questionText.includes(term.toLowerCase()))
+          .slice(0, 2)
+    for (const term of [...new Set([...explicit, ...inferred])]) {
+      wrongCountByTerm.set(term.toLowerCase(), (wrongCountByTerm.get(term.toLowerCase()) || 0) + 1)
+    }
+  }
+  const normalizedSavedTerms = savedTerms.map(normalizeTerm).filter((term) => /^[A-Za-z][A-Za-z'-]*$/.test(term))
+  const relatedTerms = [...wrongCountByTerm.keys()].map(
+    (key) => contentVocabulary.find((item) => normalizeTerm(item.term).toLowerCase() === key)?.term || key
+  )
+  const termsByKey = new Map()
+  for (const term of [...normalizedSavedTerms, ...relatedTerms]) {
+    const key = term.toLowerCase()
+    if (!termsByKey.has(key)) termsByKey.set(key, term)
+  }
+  const terms = [...termsByKey.values()].slice(0, 6)
   const now = new Date().toISOString()
   let savedCount = 0
   for (const term of terms) {
     const detail = contentVocabulary.find((item) => item.term.toLowerCase() === term.toLowerCase())
     const existing = db.vocabulary.find((item) => item.userId === userId && item.term.toLowerCase() === term.toLowerCase())
+    const wrongQuestionCount = wrongCountByTerm.get(term.toLowerCase()) || 0
     if (existing) {
       existing.seenCount = Number(existing.seenCount || 0) + 1
       existing.lastSeenAt = now
       existing.dueAt = existing.dueAt || now
-      existing.wrongQuestionCount = Number(existing.wrongQuestionCount || 0) + wrongQuestions.length
+      existing.wrongQuestionCount = Number(existing.wrongQuestionCount || 0) + wrongQuestionCount
     } else {
       db.vocabulary.push({
         id: nanoid(),
@@ -4865,7 +4914,7 @@ function saveMicroVocabularyFromAttempt(db, userId, practice, wrongQuestions, sa
         meaningZh: detail?.meaningZh || fallbackChineseMeaning(term),
         simpleEnglish: detail?.simpleEnglish || 'A useful word from a daily micro practice.',
         exampleSentence: exampleSentenceFromText(practice.content?.body || '', term),
-        wrongQuestionCount: wrongQuestions.length,
+        wrongQuestionCount,
         sourceBookTitle: practice.sourceBookTitle || '每日轻练',
         seenCount: 1,
         mastery: 0,
@@ -6716,63 +6765,90 @@ async function createApp() {
     }
   })
 
-  app.post('/api/micro-practices/:practiceId/complete', auth, async (req, res) => {
-    const db = req.db
-    const practice = (db.microPractices || []).find((item) => item.id === req.params.practiceId && item.userId === req.user.id)
-    if (!practice?.content) {
-      res.status(404).json({ error: '未找到这次轻练' })
-      return
-    }
+  app.post('/api/micro-practices/:practiceId/complete', auth, async (req, res, next) => {
+    try {
+      await withKeyedLock(microCompletionLocks, `${req.user.id}:${req.params.practiceId}`, async () => {
+        const db = await readDb()
+        const practice = (db.microPractices || []).find((item) => item.id === req.params.practiceId && item.userId === req.user.id)
+        if (!practice?.content) {
+          res.status(404).json({ error: '未找到这次轻练' })
+          return
+        }
 
-    const answers = req.body.answers || {}
-    const questions = practice.content.questions || []
-    const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
-    const wrongQuestions = questions
-      .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
-      .map((question) => ({
-        id: question.id,
-        prompt: question.prompt,
-        explanationZh: question.explanationZh,
-        relatedTerms: question.relatedTerms || [],
-      }))
-    const correctRate = questions.length ? correctCount / questions.length : 0
-    const savedVocabularyCount = saveMicroVocabularyFromAttempt(db, req.user.id, practice, wrongQuestions, Array.isArray(req.body.savedTerms) ? req.body.savedTerms : [])
-    const elapsedSeconds = Math.max(0, Number(req.body.elapsedSeconds || 0))
-    const fallbackMinutes = practice.type === 'listening' ? 3 : 2
-    const studyMinutes = Math.max(1, Math.min(15, Math.round(elapsedSeconds / 60) || fallbackMinutes))
-    const attempt = {
-      id: nanoid(),
-      userId: req.user.id,
-      practiceId: practice.id,
-      type: practice.type,
-      typeLabel: practice.typeLabel || microPracticeTypeLabel(practice.type),
-      topic: practice.topic,
-      topicLabel: practice.topicLabel,
-      difficulty: practice.difficulty,
-      sourceMode: practice.sourceMode,
-      sourceBookId: practice.sourceBookId || '',
-      sourceBookTitle: practice.sourceBookTitle || '',
-      correctCount,
-      questionCount: questions.length,
-      correctRate,
-      answers,
-      wrongQuestions,
-      savedVocabularyCount,
-      studyMinutes,
-      suggestion: microPracticeSuggestion(correctRate, practice.type, practice.difficulty),
-      createdAt: new Date().toISOString(),
+        const existingAttempt =
+          (practice.lastAttemptId && (db.microAttempts || []).find((item) => item.id === practice.lastAttemptId && item.userId === req.user.id)) ||
+          (db.microAttempts || []).find((item) => item.practiceId === practice.id && item.userId === req.user.id)
+        if (existingAttempt) {
+          if (practice.status !== 'completed' || practice.lastAttemptId !== existingAttempt.id) {
+            practice.status = 'completed'
+            practice.completedAt = practice.completedAt || existingAttempt.createdAt
+            practice.lastAttemptId = existingAttempt.id
+            practice.updatedAt = existingAttempt.createdAt || new Date().toISOString()
+            await writeDb(db)
+          }
+          res.json({
+            attempt: publicMicroAttempt(existingAttempt),
+            practice: publicMicroPractice(practice),
+            stats: computeStats(db, req.user.id),
+            duplicate: true,
+          })
+          return
+        }
+
+        const answers = req.body.answers || {}
+        const questions = practice.content.questions || []
+        const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
+        const wrongQuestions = questions
+          .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
+          .map((question) => ({
+            id: question.id,
+            prompt: question.prompt,
+            explanationZh: question.explanationZh,
+            relatedTerms: question.relatedTerms || [],
+          }))
+        const correctRate = questions.length ? correctCount / questions.length : 0
+        const savedVocabularyCount = saveMicroVocabularyFromAttempt(db, req.user.id, practice, wrongQuestions, Array.isArray(req.body.savedTerms) ? req.body.savedTerms : [])
+        const elapsedSeconds = Math.max(0, Number(req.body.elapsedSeconds || 0))
+        const fallbackMinutes = practice.type === 'listening' ? 3 : 2
+        const studyMinutes = Math.max(1, Math.min(15, Math.round(elapsedSeconds / 60) || fallbackMinutes))
+        const attempt = {
+          id: nanoid(),
+          userId: req.user.id,
+          practiceId: practice.id,
+          type: practice.type,
+          typeLabel: practice.typeLabel || microPracticeTypeLabel(practice.type),
+          topic: practice.topic,
+          topicLabel: practice.topicLabel,
+          difficulty: practice.difficulty,
+          sourceMode: practice.sourceMode,
+          sourceBookId: practice.sourceBookId || '',
+          sourceBookTitle: practice.sourceBookTitle || '',
+          correctCount,
+          questionCount: questions.length,
+          correctRate,
+          answers,
+          wrongQuestions,
+          savedVocabularyCount,
+          studyMinutes,
+          suggestion: microPracticeSuggestion(correctRate, practice.type, practice.difficulty),
+          createdAt: new Date().toISOString(),
+        }
+        db.microAttempts.push(attempt)
+        practice.status = 'completed'
+        practice.completedAt = attempt.createdAt
+        practice.lastAttemptId = attempt.id
+        practice.updatedAt = attempt.createdAt
+        await writeDb(db)
+        res.json({
+          attempt: publicMicroAttempt(attempt),
+          practice: publicMicroPractice(practice),
+          stats: computeStats(db, req.user.id),
+          duplicate: false,
+        })
+      })
+    } catch (error) {
+      next(error)
     }
-    db.microAttempts.push(attempt)
-    practice.status = 'completed'
-    practice.completedAt = attempt.createdAt
-    practice.lastAttemptId = attempt.id
-    practice.updatedAt = attempt.createdAt
-    await writeDb(db)
-    res.json({
-      attempt: publicMicroAttempt(attempt),
-      practice: publicMicroPractice(practice),
-      stats: computeStats(db, req.user.id),
-    })
   })
 
   app.get('/api/micro-practices/:practiceId/audio', auth, async (req, res, next) => {
