@@ -91,6 +91,15 @@ try {
   consoleErrors.length = 0
   await page.screenshot({ path: path.join(outputDir, 'home-desktop.png'), fullPage: true })
 
+  const desktopRouteAudit = ['micro', 'dashboard', 'reports', 'vocabulary', 'tasks', 'services', 'admin', 'settings', 'home']
+  for (const route of desktopRouteAudit) {
+    await page.locator(`[data-nav-view="${route}"]`).click()
+    await page.locator(`[data-nav-view="${route}"][aria-current="page"]`).waitFor({ state: 'visible' })
+    await page.waitForTimeout(120)
+    const contentLength = await page.locator('.workspace-content').evaluate((element) => element.textContent?.trim().length || 0)
+    if (contentLength < 8) throw new Error(`页面 ${route} 未渲染有效内容`)
+  }
+
   await page.locator('[data-nav-view="library"]').click()
   await page.locator('.upload-dropzone').waitFor({ state: 'visible' })
   await page.screenshot({ path: path.join(outputDir, 'library-desktop.png'), fullPage: true })
@@ -127,7 +136,7 @@ try {
 
   if (consoleErrors.length) throw new Error(`浏览器控制台错误：\n${consoleErrors.join('\n')}`)
 
-  console.log(`Visual check passed: ${JSON.stringify(viewportAudit)}`)
+  console.log(`Visual check passed: ${JSON.stringify({ ...viewportAudit, auditedDesktopRoutes: desktopRouteAudit.length + 1 })}`)
   console.log(`Screenshots: ${outputDir}`)
 } finally {
   await browser.close()

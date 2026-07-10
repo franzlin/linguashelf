@@ -1,3 +1,7 @@
+@layer base, theme;
+
+/* Functional base rules shared by every page and interaction state. */
+@layer base {
 :root {
   --bg: #faf9f6;
   --surface: #ffffff;
@@ -3142,4 +3146,5 @@ p {
   .review-actions button {
     flex: 1 1 120px;
   }
+}
 }
