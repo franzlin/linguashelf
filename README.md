@@ -253,11 +253,15 @@ STORAGE_DRIVER=json
 ```bash
 npm run check
 npm run build
+npm run e2e
+npm run visual
 npm run predeploy
 npm start
 ```
 
 `npm start` 会以生产模式运行已构建的 `dist`。
+
+`npm run e2e` 会使用隔离数据目录和外部 Chromium 执行完整业务回归。`npm run visual` 会启动隔离测试服务器，生成桌面首页、桌面书库、Android 390px 书库和移动端更多导航截图，并检查横向溢出、移动导航可见性、触控高度和浏览器控制台错误。截图输出到 `work-screenshots/frontend-rebuild`。
 
 如果服务已经启动，可以带上目标地址做 HTTP 验收：
 

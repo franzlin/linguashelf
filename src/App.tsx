@@ -19,7 +19,6 @@ import {
   Home,
   ListChecks,
   Loader2,
-  LogOut,
   MapPin,
   Pause,
   Pencil,
@@ -27,7 +26,6 @@ import {
   RotateCcw,
   Server,
   ShieldCheck,
-  Settings,
   Tags,
   TrendingUp,
   Trash2,
@@ -36,8 +34,9 @@ import {
   Volume2,
   X,
 } from 'lucide-react'
+import { AppShell } from './components/AppShell'
+import type { View } from './navigation'
 
-type View = 'home' | 'library' | 'book' | 'study' | 'micro' | 'dashboard' | 'reports' | 'vocabulary' | 'tasks' | 'services' | 'admin' | 'settings'
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
 type UserProfile = {
@@ -1436,23 +1435,16 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar
-        user={data.user}
-        isAdmin={isAdmin}
-        view={view}
-        onNavigate={setView}
-        onLogout={logout}
-      />
-      <main className="workspace">
-        <TopBar
-          view={view}
-          user={data.user}
-          isAdmin={isAdmin}
-          onNavigate={setView}
-          installPrompt={installPrompt}
-          onInstall={installApp}
-        />
+    <AppShell
+      user={data.user}
+      isAdmin={Boolean(isAdmin)}
+      view={view}
+      installAvailable={Boolean(installPrompt)}
+      installLabel={isAndroidBrowser() ? '安装到手机' : '安装'}
+      onNavigate={setView}
+      onInstall={installApp}
+      onLogout={logout}
+    >
         {error && (
           <div className="notice danger">
             <X size={18} />
@@ -1600,8 +1592,7 @@ export function App() {
             onError={setError}
           />
         )}
-      </main>
-    </div>
+    </AppShell>
   )
 }
 
@@ -2029,146 +2020,6 @@ function LoadingScreen({ error = '', onRetry }: { error?: string; onRetry?: () =
         </>
       )}
     </main>
-  )
-}
-
-function Sidebar({
-  user,
-  isAdmin,
-  view,
-  onNavigate,
-  onLogout,
-}: {
-  user: UserProfile
-  isAdmin: boolean
-  view: View
-  onNavigate: (view: View) => void
-  onLogout: () => void
-}) {
-  const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
-    { view: 'home', label: '首页', icon: Home },
-    { view: 'library', label: '书库', icon: BookOpen },
-    { view: 'micro', label: '轻练', icon: Brain },
-    { view: 'dashboard', label: '数据', icon: Activity },
-    { view: 'reports', label: '报告', icon: BarChart3 },
-    { view: 'vocabulary', label: '生词', icon: BookMarked },
-    { view: 'tasks', label: '任务', icon: ListChecks },
-    { view: 'services', label: '服务', icon: Server, adminOnly: true },
-    { view: 'admin', label: '后台', icon: ShieldCheck, adminOnly: true },
-    { view: 'settings', label: '设置', icon: Settings },
-  ]
-  const items = allItems.filter((item) => !item.adminOnly || isAdmin)
-
-  return (
-    <aside className="sidebar">
-      <div className="sidebar-brand">
-        <BookOpen size={24} />
-        <span>LinguaShelf</span>
-      </div>
-      <nav className="side-nav" aria-label="主导航">
-        {items.map((item) => {
-          const Icon = item.icon
-          return (
-            <button
-              key={item.view}
-              className={view === item.view ? 'active' : ''}
-              type="button"
-              onClick={() => onNavigate(item.view)}
-            >
-              <Icon size={18} />
-              {item.label}
-            </button>
-          )
-        })}
-      </nav>
-      <div className="sidebar-user">
-        <span>{user.email}</span>
-        <button type="button" onClick={onLogout}>
-          <LogOut size={17} />
-          退出
-        </button>
-      </div>
-    </aside>
-  )
-}
-
-function TopBar({
-  view,
-  user,
-  isAdmin,
-  onNavigate,
-  installPrompt,
-  onInstall,
-}: {
-  view: View
-  user: UserProfile
-  isAdmin: boolean
-  onNavigate: (view: View) => void
-  installPrompt: BeforeInstallPromptEvent | null
-  onInstall: () => void
-}) {
-  const titles: Record<View, string> = {
-    home: '首页',
-    library: '书库',
-    book: '学习单元',
-    study: '阅读训练',
-    micro: '每日轻练',
-    dashboard: '学习数据',
-    reports: '学习报告',
-    vocabulary: '生词本',
-    tasks: '任务',
-    services: 'AI 服务',
-    admin: '管理后台',
-    settings: '设置',
-  }
-  const allItems: Array<{ view: View; label: string; icon: typeof Home; adminOnly?: boolean }> = [
-    { view: 'home', label: '首页', icon: Home },
-    { view: 'library', label: '书库', icon: BookOpen },
-    { view: 'micro', label: '轻练', icon: Brain },
-    { view: 'dashboard', label: '数据', icon: Activity },
-    { view: 'reports', label: '报告', icon: BarChart3 },
-    { view: 'vocabulary', label: '生词', icon: BookMarked },
-    { view: 'tasks', label: '任务', icon: ListChecks },
-    { view: 'services', label: '服务', icon: Server, adminOnly: true },
-    { view: 'admin', label: '后台', icon: ShieldCheck, adminOnly: true },
-    { view: 'settings', label: '设置', icon: Settings },
-  ]
-  const items = allItems.filter((item) => !item.adminOnly || isAdmin)
-  const installLabel = isAndroidBrowser() ? '安装到手机' : '安装'
-
-  return (
-    <>
-      <header className="topbar">
-        <div>
-          <span className="eyebrow">{user.name}</span>
-          <h2>{titles[view]}</h2>
-        </div>
-        {installPrompt && (
-          <div className="topbar-actions">
-            <button className="secondary-button install-button" type="button" onClick={onInstall}>
-              <Download size={17} />
-              {installLabel}
-            </button>
-          </div>
-        )}
-      </header>
-      <nav className="mobile-nav" aria-label="移动端导航">
-        {items.map((item) => {
-          const Icon = item.icon
-          return (
-            <button
-              key={item.view}
-              className={view === item.view ? 'active' : ''}
-              type="button"
-              onClick={() => onNavigate(item.view)}
-            >
-              <Icon size={18} />
-              <span>{item.label}</span>
-            </button>
-          )
-        })}
-      </nav>
-    </>
   )
 }
 
