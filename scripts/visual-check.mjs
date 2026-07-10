@@ -70,6 +70,10 @@ try {
   await page.goto(baseUrl, { waitUntil: 'networkidle' })
 
   if (await page.locator('input[type="email"]').count()) {
+    await page.screenshot({ path: path.join(outputDir, 'login-desktop.png'), fullPage: true })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.screenshot({ path: path.join(outputDir, 'login-mobile-390.png'), fullPage: true })
+    await page.setViewportSize({ width: 1440, height: 1000 })
     await page.locator('input[type="email"]').fill(email)
     await page.locator('input[type="password"]').fill(password)
     await page.getByRole('button', { name: '登录 / 创建账号' }).click()
