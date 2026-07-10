@@ -17,9 +17,11 @@ import lamejs from '@breezystack/lamejs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
 const execFileAsync = promisify(execFile)
+const pbkdf2Async = promisify(crypto.pbkdf2)
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, 'data')
 const backupDir = process.env.BACKUP_DIR ? path.resolve(process.env.BACKUP_DIR) : path.join(root, 'backups')
 const uploadDir = path.join(dataDir, 'uploads')
+const uploadTempDir = path.join(dataDir, 'upload-tmp')
 const audioDir = path.join(dataDir, 'audio')
 const dbPath = path.join(dataDir, 'db.json')
 const sqlitePath = path.join(dataDir, 'app.sqlite')
@@ -38,6 +40,7 @@ const maxAutoRegenAttempts = Number(process.env.MAX_AUTO_REGEN_ATTEMPTS || 1)
 const maxAutoFailureRetries = Math.max(0, Number(process.env.MAX_AUTO_FAILURE_RETRIES || 2))
 const autoFailureRetryBaseSeconds = Math.max(30, Number(process.env.AUTO_FAILURE_RETRY_BASE_SECONDS || 180))
 const maxUploadBytes = bytesFromMegabytes(process.env.MAX_UPLOAD_MB, 50)
+const maxActiveUploadParses = Math.max(1, Number(process.env.MAX_ACTIVE_UPLOAD_PARSES) || 1)
 const maxEpubUploadBytes = bytesFromMegabytes(process.env.MAX_EPUB_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
 const maxPdfUploadBytes = bytesFromMegabytes(process.env.MAX_PDF_UPLOAD_MB, Math.min(50, maxUploadBytes / 1024 / 1024))
 const maxEpubExpandedBytes = bytesFromMegabytes(process.env.MAX_EPUB_EXPANDED_MB, 200)
@@ -97,14 +100,24 @@ const microCompletionLocks = new Map()
 const unitCompletionLocks = new Map()
 const unitProgressLocks = new Map()
 const ocrSlotWaiters = []
+const uploadParseWaiters = []
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
 let writeChain = Promise.resolve()
 let activeOcrTasks = 0
+let activeUploadParses = 0
 let geminiOfficialTtsCursor = 0
 let ocrJobQueueActive = false
 
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      fs.mkdir(uploadTempDir, { recursive: true }).then(() => callback(null, uploadTempDir), callback)
+    },
+    filename: (_req, file, callback) => {
+      const extension = path.extname(file.originalname || '').toLowerCase().slice(0, 12)
+      callback(null, `${Date.now()}-${nanoid()}${extension}`)
+    },
+  }),
   limits: { fileSize: maxUploadBytes, files: 1 },
 })
 
@@ -131,6 +144,7 @@ let sqliteDb = null
 
 async function ensureStore() {
   await fs.mkdir(uploadDir, { recursive: true })
+  await fs.mkdir(uploadTempDir, { recursive: true })
   await fs.mkdir(audioDir, { recursive: true })
 
   if (storageDriver === 'sqlite') {
@@ -563,7 +577,7 @@ async function ensureInitialAdmin() {
     id: nanoid(),
     email,
     name: email.split('@')[0] || 'Admin',
-    passwordHash: hashPassword(password),
+    passwordHash: await hashPassword(password),
     role: 'admin',
     createdAt: new Date().toISOString(),
   })
@@ -571,16 +585,16 @@ async function ensureInitialAdmin() {
   await writeDb(db)
 }
 
-function derivePasswordHash(password, salt, iterations) {
-  return crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('hex')
+async function derivePasswordHash(password, salt, iterations) {
+  return (await pbkdf2Async(password, salt, iterations, 32, 'sha256')).toString('hex')
 }
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex'), iterations = passwordPbkdf2Iterations) {
-  const hash = derivePasswordHash(password, salt, iterations)
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex'), iterations = passwordPbkdf2Iterations) {
+  const hash = await derivePasswordHash(password, salt, iterations)
   return `pbkdf2-sha256$${iterations}$${salt}$${hash}`
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
   const value = String(stored || '')
   let salt = ''
   let hash = ''
@@ -594,7 +608,7 @@ function verifyPassword(password, stored) {
     ;[salt, hash] = value.split(':')
   }
   if (!salt || !hash || !Number.isInteger(iterations) || iterations < 1) return false
-  const candidate = derivePasswordHash(password, salt, iterations)
+  const candidate = await derivePasswordHash(password, salt, iterations)
   const expected = Buffer.from(hash, 'hex')
   const actual = Buffer.from(candidate, 'hex')
   return expected.length === actual.length && crypto.timingSafeEqual(actual, expected)
@@ -674,35 +688,53 @@ async function auth(req, res, next) {
   const header = req.headers.authorization || ''
   const bearerToken = header.startsWith('Bearer ') ? header.slice(7) : ''
   const cookieToken = requestCookie(req, sessionCookieName)
-  const token = cookieToken || bearerToken
-  if (!token) {
+  const candidates = [
+    ...(cookieToken ? [{ token: cookieToken, source: 'cookie' }] : []),
+    ...(bearerToken && bearerToken !== cookieToken ? [{ token: bearerToken, source: 'bearer' }] : []),
+  ]
+  if (!candidates.length) {
     res.status(401).json({ error: '需要登录' })
     return
   }
 
   const db = await readDb()
-  const tokenHash = hashSessionToken(token)
-  const session = db.sessions.find((item) => item.tokenHash === tokenHash || item.token === token)
-  const user = session ? db.users.find((item) => item.id === session.userId) : null
-  if (!session || !user) {
+  let selected = null
+  let changed = false
+  for (const candidate of candidates) {
+    const tokenHash = hashSessionToken(candidate.token)
+    const session = db.sessions.find((item) => item.tokenHash === tokenHash || item.token === candidate.token)
+    const user = session ? db.users.find((item) => item.id === session.userId) : null
+    if (!session || !user) {
+      if (session && !user) {
+        db.sessions = db.sessions.filter((item) => item !== session)
+        changed = true
+      }
+      continue
+    }
+    if (isSessionExpired(session)) {
+      db.sessions = db.sessions.filter((item) => item !== session)
+      changed = true
+      continue
+    }
+    selected = { ...candidate, tokenHash, session, user }
+    break
+  }
+
+  if (!selected) {
+    if (changed) await writeDb(db)
     if (cookieToken) clearSessionCookie(req, res)
     res.status(401).json({ error: '登录已失效' })
     return
   }
-  if (isSessionExpired(session)) {
-    db.sessions = db.sessions.filter((item) => item !== session)
-    await writeDb(db)
-    clearSessionCookie(req, res)
-    res.status(401).json({ error: '登录已过期，请重新登录' })
-    return
-  }
 
+  const { token, tokenHash, session, user, source } = selected
   if (!session.tokenHash || session.token) {
     session.tokenHash = tokenHash
     delete session.token
-    await writeDb(db)
+    changed = true
   }
-  if (!cookieToken) setSessionCookie(req, res, token, session.expiresAt)
+  if (changed) await writeDb(db)
+  if (source !== 'cookie') setSessionCookie(req, res, token, session.expiresAt)
 
   req.user = user
   req.sessionTokenHash = tokenHash
@@ -1298,6 +1330,21 @@ async function withOcrSlot(task) {
   } finally {
     activeOcrTasks -= 1
     ocrSlotWaiters.shift()?.()
+  }
+}
+
+async function withUploadParseSlot(task) {
+  if (activeUploadParses >= maxActiveUploadParses) {
+    await new Promise((resolve) => uploadParseWaiters.push(resolve))
+  } else {
+    activeUploadParses += 1
+  }
+  try {
+    return await task()
+  } finally {
+    const next = uploadParseWaiters.shift()
+    if (next) next()
+    else activeUploadParses = Math.max(0, activeUploadParses - 1)
   }
 }
 
@@ -6847,6 +6894,11 @@ function uploadBookFile(req, res, next) {
   })
 }
 
+function limitBookUpload(req, res, next) {
+  if (!consumeUserQuota(req, res, 'upload')) return
+  next()
+}
+
 async function createApp() {
   await ensureStore()
   await ensureInitialAdmin()
@@ -6938,19 +6990,19 @@ async function createApp() {
         id: nanoid(),
         email,
         name: email.split('@')[0] || 'Learner',
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPassword(password),
         role: 'user',
         createdAt: new Date().toISOString(),
       }
       db.users.push(user)
       userSettings(db, user.id)
     } else {
-      if (!verifyPassword(password, user.passwordHash)) {
+      if (!(await verifyPassword(password, user.passwordHash))) {
         recordLoginFailure(limit.key)
         res.status(401).json({ error: loginFailureMessage })
         return
       }
-      if (passwordHashNeedsUpgrade(user.passwordHash)) user.passwordHash = hashPassword(password)
+      if (passwordHashNeedsUpgrade(user.passwordHash)) user.passwordHash = await hashPassword(password)
     }
 
     const token = nanoid(48)
@@ -7064,6 +7116,7 @@ async function createApp() {
         maxPodcastEpisodes,
         maxActivePodcastJobs,
         maxUploadMb: Math.round(maxUploadBytes / 1024 / 1024),
+        maxActiveUploadParses,
         maxEpubUploadMb: Math.round(maxEpubUploadBytes / 1024 / 1024),
         maxPdfUploadMb: Math.round(maxPdfUploadBytes / 1024 / 1024),
         pdfOcrEnabled,
@@ -7129,7 +7182,7 @@ async function createApp() {
       res.status(400).json({ error: passwordError })
       return
     }
-    if (!verifyPassword(currentPassword, req.user.passwordHash)) {
+    if (!(await verifyPassword(currentPassword, req.user.passwordHash))) {
       res.status(401).json({ error: '当前密码不正确' })
       return
     }
@@ -7140,7 +7193,7 @@ async function createApp() {
       res.status(404).json({ error: '账号不存在' })
       return
     }
-    user.passwordHash = hashPassword(nextPassword)
+    user.passwordHash = await hashPassword(nextPassword)
     user.passwordChangedAt = new Date().toISOString()
     db.sessions = db.sessions.filter((session) => session.tokenHash === req.sessionTokenHash || session.userId !== user.id)
     await writeDb(db)
@@ -7346,9 +7399,11 @@ async function createApp() {
     }
   })
 
-  app.post('/api/books/upload', auth, uploadBookFile, async (req, res, next) => {
+  app.post('/api/books/upload', auth, limitBookUpload, uploadBookFile, async (req, res, next) => {
+    let temporaryPath = req.file?.path || ''
+    let movedSourcePath = ''
+    let persisted = false
     try {
-      if (!consumeUserQuota(req, res, 'upload')) return
       if (!req.file) {
         res.status(400).json({ error: '请选择 EPUB 或 PDF 文件' })
         return
@@ -7368,72 +7423,82 @@ async function createApp() {
         res.status(400).json({ error: `PDF 第一版建议不超过 ${formatMegabytes(maxPdfUploadBytes)}` })
         return
       }
-      if (ext === '.epub' && !(await isEpubFile(req.file.buffer))) {
-        res.status(400).json({ error: '文件内容不像有效的 EPUB，请确认文件没有损坏' })
-        return
-      }
-      if (ext === '.pdf' && !isPdfFile(req.file.buffer)) {
-        res.status(400).json({ error: '文件内容不像有效的 PDF，请确认文件没有损坏' })
-        return
-      }
+      await withUploadParseSlot(async () => {
+        const buffer = await fs.readFile(temporaryPath)
+        if (ext === '.epub' && !(await isEpubFile(buffer))) {
+          res.status(400).json({ error: '文件内容不像有效的 EPUB，请确认文件没有损坏' })
+          return
+        }
+        if (ext === '.pdf' && !isPdfFile(buffer)) {
+          res.status(400).json({ error: '文件内容不像有效的 PDF，请确认文件没有损坏' })
+          return
+        }
 
-      const parsed = ext === '.epub' ? await parseEpub(req.file.buffer, original) : await parsePdf(req.file.buffer, original, { deferOcr: true })
-      const db = req.db
-      const settings = userSettings(db, req.user.id)
-      const bookId = nanoid()
-      let sourcePath = ''
-      if (settings.keepSourceFiles || parsed.needsOcr) {
-        const userDir = path.join(uploadDir, req.user.id)
-        await fs.mkdir(userDir, { recursive: true })
-        sourcePath = path.join(userDir, `${bookId}${ext}`)
-        await fs.writeFile(sourcePath, req.file.buffer)
-      }
+        const parsed = ext === '.epub' ? await parseEpub(buffer, original) : await parsePdf(buffer, original, { deferOcr: true })
+        const db = await readDb()
+        const settings = userSettings(db, req.user.id)
+        const bookId = nanoid()
+        let sourcePath = ''
+        if (settings.keepSourceFiles || parsed.needsOcr) {
+          const userDir = path.join(uploadDir, req.user.id)
+          await fs.mkdir(userDir, { recursive: true })
+          sourcePath = path.join(userDir, `${bookId}${ext}`)
+          await fs.rename(temporaryPath, sourcePath)
+          temporaryPath = ''
+          movedSourcePath = sourcePath
+        }
 
-      const book = {
-        id: bookId,
-        userId: req.user.id,
-        title: parsed.title,
-        author: parsed.author,
-        type: parsed.type,
-        filename: original,
-        sourcePath,
-        sourceTemporary: Boolean(parsed.needsOcr && !settings.keepSourceFiles),
-        chapterCount: parsed.chapters.length,
-        wordCount: parsed.chapters.reduce((total, chapter) => total + chapter.wordCount, 0),
-        status: parsed.needsOcr ? 'processing' : 'ready',
-        createdAt: new Date().toISOString(),
-      }
-      const units = planUnits(bookId, parsed.chapters, parsed.type)
-      db.books.push(book)
-      db.units.push(...units)
-      if (parsed.needsOcr) {
-        const job = enqueuePdfOcrJob(db, req.user.id, book, parsed.pageCount, req.file.size)
-        await writeDb(db)
-        setTimeout(processOcrJobQueue, 0)
-        res.status(202).json({
-          book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) },
-          units: [],
-          job: publicJobWithContext(job, db),
-        })
-        return
-      }
-      if (parsed.ocr) {
-        recordAiUsage(db, {
+        const book = {
+          id: bookId,
           userId: req.user.id,
-          category: 'ocr',
-          action: 'pdf-ocr',
-          provider: parsed.ocr.provider,
-          model: parsed.ocr.provider,
-          pages: parsed.ocr.pagesAttempted || parsed.ocr.pages,
-          bytes: req.file.size,
-          success: true,
-        })
-      }
-      await writeDb(db)
+          title: parsed.title,
+          author: parsed.author,
+          type: parsed.type,
+          filename: original,
+          sourcePath,
+          sourceTemporary: Boolean(parsed.needsOcr && !settings.keepSourceFiles),
+          chapterCount: parsed.chapters.length,
+          wordCount: parsed.chapters.reduce((total, chapter) => total + chapter.wordCount, 0),
+          status: parsed.needsOcr ? 'processing' : 'ready',
+          createdAt: new Date().toISOString(),
+        }
+        const units = planUnits(bookId, parsed.chapters, parsed.type)
+        db.books.push(book)
+        db.units.push(...units)
+        if (parsed.needsOcr) {
+          const job = enqueuePdfOcrJob(db, req.user.id, book, parsed.pageCount, req.file.size)
+          await writeDb(db)
+          persisted = true
+          setTimeout(processOcrJobQueue, 0)
+          res.status(202).json({
+            book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) },
+            units: [],
+            job: publicJobWithContext(job, db),
+          })
+          return
+        }
+        if (parsed.ocr) {
+          recordAiUsage(db, {
+            userId: req.user.id,
+            category: 'ocr',
+            action: 'pdf-ocr',
+            provider: parsed.ocr.provider,
+            model: parsed.ocr.provider,
+            pages: parsed.ocr.pagesAttempted || parsed.ocr.pages,
+            bytes: req.file.size,
+            success: true,
+          })
+        }
+        await writeDb(db)
+        persisted = true
 
-      res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) }, units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
+        res.json({ book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) }, units: units.map((unit) => publicUnit(unit, db, req.user.id)) })
+      })
     } catch (error) {
       next(error)
+    } finally {
+      if (temporaryPath) await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+      if (movedSourcePath && !persisted) await deleteSourceFileIfSafe(movedSourcePath)
     }
   })
 

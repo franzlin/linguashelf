@@ -94,6 +94,7 @@ async function checkEnvExample() {
     'PASSWORD_PBKDF2_ITERATIONS',
     'STORAGE_DRIVER',
     'MAX_UPLOAD_MB',
+    'MAX_ACTIVE_UPLOAD_PARSES',
     'PDF_OCR_ENABLED',
     'PDF_OCR_PROVIDER',
     'PDF_OCR_VISION_MODEL',

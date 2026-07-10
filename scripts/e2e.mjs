@@ -152,6 +152,116 @@ async function verifyAtomicRestoreFailure() {
   await fs.rm(restoreRoot, { recursive: true, force: true })
 }
 
+async function verifyConsistentSqliteBackup() {
+  const backupRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-backup-e2e-'))
+  const sourceDataDir = path.join(backupRoot, 'source-data')
+  const restoredDataDir = path.join(backupRoot, 'restored-data')
+  const backupFile = path.join(backupRoot, 'snapshot.zip')
+  const extractedSqlite = path.join(backupRoot, 'snapshot.sqlite')
+  await fs.mkdir(sourceDataDir, { recursive: true })
+  await fs.mkdir(path.join(sourceDataDir, 'upload-tmp'), { recursive: true })
+  await fs.writeFile(path.join(sourceDataDir, 'upload-tmp', 'partial-upload.epub'), 'incomplete upload')
+
+  const liveDb = new DatabaseSync(path.join(sourceDataDir, 'app.sqlite'))
+  try {
+    liveDb.exec(`
+      PRAGMA journal_mode=WAL;
+      CREATE TABLE records (
+        collection TEXT NOT NULL,
+        id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        PRIMARY KEY(collection, id)
+      );
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO records VALUES ('users', 'backup-user', '{"id":"backup-user"}', '2026-07-10T00:00:00.000Z');
+      INSERT INTO meta VALUES ('initialized', '1');
+    `)
+
+    await execFileAsync(process.execPath, [path.join(root, 'scripts', 'backup.mjs'), '--out', backupFile], {
+      cwd: root,
+      env: {
+        ...process.env,
+        DATA_DIR: sourceDataDir,
+        BACKUP_ENCRYPTION_REQUIRED: 'false',
+        BACKUP_KEY: '',
+      },
+      timeout: 30_000,
+    })
+
+    const zip = await JSZip.loadAsync(await fs.readFile(backupFile))
+    const names = Object.keys(zip.files)
+    if (!names.includes('data/app.sqlite')) throw new Error('Consistent backup did not contain app.sqlite')
+    if (names.some((name) => name.endsWith('app.sqlite-wal') || name.endsWith('app.sqlite-shm'))) {
+      throw new Error(`Consistent backup copied live SQLite sidecars: ${JSON.stringify(names)}`)
+    }
+    if (names.some((name) => name.startsWith('data/upload-tmp/'))) {
+      throw new Error(`Consistent backup copied temporary uploads: ${JSON.stringify(names)}`)
+    }
+    const meta = JSON.parse(await zip.file('backup-meta.json').async('string'))
+    if (meta.databaseSnapshot !== 'sqlite-vacuum-into') {
+      throw new Error(`Backup did not report a transaction-consistent SQLite snapshot: ${JSON.stringify(meta)}`)
+    }
+
+    await fs.writeFile(extractedSqlite, await zip.file('data/app.sqlite').async('nodebuffer'))
+    const snapshotDb = new DatabaseSync(extractedSqlite, { readOnly: true })
+    try {
+      const integrity = snapshotDb.prepare('PRAGMA integrity_check').get()
+      const count = snapshotDb.prepare('SELECT COUNT(*) AS count FROM records').get()
+      if (String(integrity?.integrity_check || '').toLowerCase() !== 'ok' || Number(count?.count || 0) !== 1) {
+        throw new Error(`SQLite backup snapshot is invalid: ${JSON.stringify({ integrity, count })}`)
+      }
+    } finally {
+      snapshotDb.close()
+    }
+
+    await execFileAsync(process.execPath, [path.join(root, 'scripts', 'restore.mjs'), backupFile], {
+      cwd: root,
+      env: { ...process.env, DATA_DIR: restoredDataDir, BACKUP_KEY: '' },
+      timeout: 30_000,
+    })
+    const restoredDb = new DatabaseSync(path.join(restoredDataDir, 'app.sqlite'), { readOnly: true })
+    try {
+      const restoredUser = restoredDb.prepare("SELECT payload FROM records WHERE collection='users' AND id='backup-user'").get()
+      if (!restoredUser || JSON.parse(restoredUser.payload).id !== 'backup-user') {
+        throw new Error('Restored consistent backup did not contain the expected record')
+      }
+    } finally {
+      restoredDb.close()
+    }
+  } finally {
+    liveDb.close()
+    await fs.rm(backupRoot, { recursive: true, force: true })
+  }
+}
+
+async function verifyPasswordChecksDoNotBlockHealth() {
+  const attempts = Array.from({ length: 4 }, (_, index) =>
+    fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: `wrong-password-${index}` }),
+    })
+  )
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const healthStartedAt = Date.now()
+  const health = await fetch(`${baseUrl}/api/health`)
+  const healthElapsedMs = Date.now() - healthStartedAt
+  await Promise.all(attempts)
+  if (!health.ok || healthElapsedMs > 750) {
+    throw new Error(`Password verification blocked the health endpoint for ${healthElapsedMs}ms`)
+  }
+}
+
+async function waitForUploadTempCleanup(uploadTempDir, label) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const entries = await fs.readdir(uploadTempDir)
+    if (!entries.length) return
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error(`${label} left temporary upload files behind: ${JSON.stringify(await fs.readdir(uploadTempDir))}`)
+}
+
 async function verifyExternalRequestTimeout() {
   const hangingServer = createServer(() => undefined)
   await new Promise((resolve, reject) => {
@@ -356,6 +466,7 @@ let browser
 try {
   await waitForServer()
   await verifyAtomicRestoreFailure()
+  await verifyConsistentSqliteBackup()
   await verifyExternalRequestTimeout()
   const epubPath = await makeEpub()
   const secondEpubPath = await makeEpub('e2e-sample-two.epub', 'E2E Second Reader')
@@ -366,6 +477,7 @@ try {
   await page.locator('input[type="password"]').fill(password)
   await page.locator('button[type="submit"]').click()
   await page.getByRole('heading', { name: '首页' }).waitFor()
+  if (await page.locator('.notice.danger').count()) throw new Error('First login displayed a stale global error notice')
   const localStorageToken = await page.evaluate(() => localStorage.getItem('linguashelf-token'))
   if (localStorageToken) throw new Error('Login persisted a session token in localStorage')
   const sessionCookie = (await page.context().cookies(baseUrl)).find((cookie) => cookie.name === 'linguashelf_session')
@@ -373,6 +485,37 @@ try {
     throw new Error(`Login did not create a hardened HttpOnly session cookie: ${JSON.stringify(sessionCookie)}`)
   }
   const token = sessionCookie.value
+
+  const bearerFallbackResponse = await fetch(`${baseUrl}/api/app`, {
+    headers: {
+      Cookie: 'linguashelf_session=expired-cookie-value',
+      Authorization: `Bearer ${token}`,
+    },
+  })
+  if (!bearerFallbackResponse.ok) {
+    throw new Error(`A stale cookie prevented valid Bearer authentication: ${bearerFallbackResponse.status}`)
+  }
+  const refreshedCookie = String(bearerFallbackResponse.headers.get('set-cookie') || '')
+  if (!refreshedCookie.includes(`linguashelf_session=${token}`)) {
+    throw new Error(`Bearer fallback did not refresh the session cookie: ${refreshedCookie}`)
+  }
+
+  await verifyPasswordChecksDoNotBlockHealth()
+
+  await page.route(
+    '**/api/app',
+    async (route) => {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'temporary app failure' }) })
+    },
+    { times: 1 }
+  )
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.getByText('暂时无法打开书架').waitFor()
+  if (await page.locator('input[type="email"]').count()) throw new Error('A transient /api/app failure returned the user to the login screen')
+  const cookieAfterFailure = (await page.context().cookies(baseUrl)).find((cookie) => cookie.name === 'linguashelf_session')
+  if (!cookieAfterFailure?.value) throw new Error('A transient /api/app failure discarded the session cookie')
+  await page.getByRole('button', { name: '重试' }).click()
+  await page.getByRole('heading', { name: '首页' }).waitFor()
 
   const authDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
   try {
@@ -461,8 +604,37 @@ try {
 
   await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
   await page.getByRole('heading', { name: '我的书库' }).waitFor()
+
+  const invalidUploadResponse = await page.request.post(`${baseUrl}/api/books/upload`, {
+    headers: { Authorization: `Bearer ${token}` },
+    multipart: {
+      file: {
+        name: 'invalid.epub',
+        mimeType: 'application/epub+zip',
+        buffer: Buffer.from('not an epub file'),
+      },
+    },
+  })
+  if (invalidUploadResponse.status() !== 400) {
+    throw new Error(`Invalid EPUB returned HTTP ${invalidUploadResponse.status()} instead of 400`)
+  }
+  const uploadTempDir = path.join(dataDir, 'upload-tmp')
+  await waitForUploadTempCleanup(uploadTempDir, 'Invalid upload')
+
   await page.locator('input[type="file"]').setInputFiles(epubPath)
   await page.getByText('E2E History Reader').waitFor({ timeout: 15000 })
+  await waitForUploadTempCleanup(uploadTempDir, 'Successful EPUB upload')
+  const uploadDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
+  try {
+    const storedBook = JSON.parse(
+      uploadDb.prepare("SELECT payload FROM records WHERE collection='books' AND payload LIKE '%E2E History Reader%' LIMIT 1").get().payload
+    )
+    if (!storedBook.sourcePath || !(await fs.stat(storedBook.sourcePath)).isFile()) {
+      throw new Error('Successful EPUB upload did not retain the configured source file')
+    }
+  } finally {
+    uploadDb.close()
+  }
   await page.screenshot({ path: path.join(screenshotDir, 'library-upload.png'), fullPage: true })
 
   const ocrUploadStartedAt = Date.now()

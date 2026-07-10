@@ -869,6 +869,16 @@ function isAndroidBrowser() {
 const tokenKey = 'linguashelf-token'
 const cookieSessionToken = 'cookie-session'
 
+class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 async function requestJson<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
@@ -876,8 +886,15 @@ async function requestJson<T>(path: string, token: string, options: RequestInit 
 
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
   const text = await response.text()
-  const payload = text ? JSON.parse(text) : {}
-  if (!response.ok) throw new Error(payload.error || '请求失败')
+  let payload: Record<string, unknown> = {}
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { error: text.slice(0, 240) }
+    }
+  }
+  if (!response.ok) throw new ApiError(String(payload.error || '请求失败'), response.status)
   return payload as T
 }
 
@@ -1130,9 +1147,14 @@ export function App() {
         setToken(cookieSessionToken)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败')
-      localStorage.removeItem(tokenKey)
-      setToken('')
+      if (err instanceof ApiError && err.status === 401) {
+        localStorage.removeItem(tokenKey)
+        setToken('')
+        setData(null)
+        setError('')
+      } else {
+        setError(err instanceof Error ? err.message : '加载失败')
+      }
     } finally {
       setLoading(false)
     }
@@ -1388,6 +1410,7 @@ export function App() {
     localStorage.removeItem(tokenKey)
     setToken('')
     setData(null)
+    setError('')
   }
 
   if (!token) {
@@ -1398,13 +1421,18 @@ export function App() {
           setToken(cookieSessionToken)
           setData(nextData)
           setView('home')
+          setError('')
         }}
       />
     )
   }
 
-  if (loading || !data) {
+  if (loading) {
     return <LoadingScreen />
+  }
+
+  if (!data) {
+    return <LoadingScreen error={error} onRetry={() => refresh()} />
   }
 
   return (
@@ -1979,11 +2007,27 @@ function DashboardView({ data, onNavigate }: { data: AppData; onNavigate: (view:
   )
 }
 
-function LoadingScreen() {
+function LoadingScreen({ error = '', onRetry }: { error?: string; onRetry?: () => void }) {
   return (
     <main className="loading-screen">
-      <Loader2 className="spin" size={28} />
-      <span>正在打开书架</span>
+      {error ? (
+        <div className="loading-error">
+          <X size={28} />
+          <strong>暂时无法打开书架</strong>
+          <span>{error}</span>
+          {onRetry && (
+            <button className="primary-button" type="button" onClick={onRetry}>
+              <RotateCcw size={17} />
+              重试
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          <Loader2 className="spin" size={28} />
+          <span>正在打开书架</span>
+        </>
+      )}
     </main>
   )
 }

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import crypto from 'node:crypto'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import JSZip from 'jszip'
@@ -18,20 +19,44 @@ if (encryptionRequired && !backupKey) {
 }
 
 await fs.mkdir(path.dirname(out), { recursive: true })
+const snapshotRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-backup-'))
 
-const zip = new JSZip()
-zip.file('backup-meta.json', JSON.stringify({ createdAt: new Date().toISOString(), app: 'LinguaShelf' }, null, 2))
-await addDirectory(zip.folder('data'), dataDir)
+try {
+  const sqliteSnapshot = await createSqliteSnapshotIfPresent(snapshotRoot)
+  const skippedDataEntries = new Set(['upload-tmp'])
+  if (sqliteSnapshot) {
+    skippedDataEntries.add('app.sqlite')
+    skippedDataEntries.add('app.sqlite-wal')
+    skippedDataEntries.add('app.sqlite-shm')
+  }
+  const zip = new JSZip()
+  zip.file(
+    'backup-meta.json',
+    JSON.stringify(
+      {
+        createdAt: new Date().toISOString(),
+        app: 'LinguaShelf',
+        databaseSnapshot: sqliteSnapshot ? 'sqlite-vacuum-into' : 'file-copy',
+      },
+      null,
+      2
+    )
+  )
+  await addDirectory(zip.folder('data'), dataDir, skippedDataEntries)
+  if (sqliteSnapshot) zip.folder('data').file('app.sqlite', await fs.readFile(sqliteSnapshot))
 
-const zipBytes = await zip.generateAsync({
-  type: 'nodebuffer',
-  compression: 'DEFLATE',
-  compressionOptions: { level: 6 },
-})
-const bytes = backupKey ? encryptBackup(zipBytes, backupKey) : zipBytes
-await fs.writeFile(out, bytes)
+  const zipBytes = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  })
+  const bytes = backupKey ? encryptBackup(zipBytes, backupKey) : zipBytes
+  await fs.writeFile(out, bytes)
 
-console.log(`Backup written: ${out}${backupKey ? ' (encrypted)' : ''}`)
+  console.log(`Backup written: ${out}${backupKey ? ' (encrypted)' : ''}`)
+} finally {
+  await fs.rm(snapshotRoot, { recursive: true, force: true })
+}
 
 function resolveOutputPath() {
   const explicit = readArg('--out')
@@ -48,7 +73,25 @@ function readArg(name) {
   return process.argv[index + 1] || ''
 }
 
-async function addDirectory(folder, dir) {
+async function createSqliteSnapshotIfPresent(snapshotRoot) {
+  const source = path.join(dataDir, 'app.sqlite')
+  try {
+    await fs.access(source)
+  } catch {
+    return ''
+  }
+  const target = path.join(snapshotRoot, 'app.sqlite')
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(source, { readOnly: true })
+  try {
+    db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`)
+  } finally {
+    db.close()
+  }
+  return target
+}
+
+async function addDirectory(folder, dir, skipRootEntries = new Set(), atRoot = true) {
   let entries = []
   try {
     entries = await fs.readdir(dir, { withFileTypes: true })
@@ -57,9 +100,10 @@ async function addDirectory(folder, dir) {
   }
 
   for (const entry of entries) {
+    if (atRoot && skipRootEntries.has(entry.name)) continue
     const source = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      await addDirectory(folder.folder(entry.name), source)
+      await addDirectory(folder.folder(entry.name), source, skipRootEntries, false)
     } else if (entry.isFile()) {
       folder.file(entry.name, await fs.readFile(source))
     }

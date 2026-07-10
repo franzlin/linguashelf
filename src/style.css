@@ -503,6 +503,20 @@ p {
   padding: 24px;
 }
 
+.loading-error {
+  width: min(420px, 100%);
+  padding: 24px;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+  color: var(--danger);
+}
+
+.loading-error span {
+  color: var(--muted);
+}
+
 .loading-screen {
   gap: 12px;
 }
