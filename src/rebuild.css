@@ -843,6 +843,37 @@ h1 {
     gap: 15px;
   }
 
+  .book-title-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+  }
+
+  .book-title-line .title-edit-button {
+    margin-top: 4px;
+  }
+
+  .podcast-kind-control {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .podcast-kind-control .segmented {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    overflow: visible;
+  }
+
+  .podcast-kind-control .segmented button {
+    min-height: 42px;
+    padding-inline: 8px;
+    white-space: normal;
+    line-height: 1.25;
+  }
+
   .topbar-actions .install-button {
     width: 42px;
     height: 42px;

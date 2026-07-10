@@ -708,6 +708,14 @@ try {
     await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
     await page.getByRole('heading', { name: '学习单元' }).waitFor()
   }
+  await page.screenshot({ path: path.join(screenshotDir, 'book-detail.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileBookMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  if (mobileBookMetrics.scrollWidth > mobileBookMetrics.width) {
+    throw new Error(`Mobile book page overflows horizontally: ${JSON.stringify(mobileBookMetrics)}`)
+  }
+  await page.screenshot({ path: path.join(screenshotDir, 'book-detail-mobile.png'), fullPage: true })
+  await page.setViewportSize({ width: 1280, height: 900 })
   await page.locator('.unit-row').first().getByRole('button', { name: /^(学习|生成)$/ }).click()
   await page.getByRole('heading', { name: '分级阅读' }).waitFor({ timeout: 20000 })
   await page.getByRole('heading', { name: '听力预热' }).waitFor()

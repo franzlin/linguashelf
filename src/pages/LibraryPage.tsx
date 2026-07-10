@@ -3,7 +3,7 @@ import type { DragEvent, KeyboardEvent } from 'react'
 import { Check, FileText, Loader2, Trash2, Upload, X } from 'lucide-react'
 import { requestJson } from '../lib/api'
 import { formatNumber } from '../lib/format'
-import type { Book, GenerationJob } from '../App'
+import type { Book, GenerationJob } from '../types/domain'
 
 type LibraryPageProps = {
   books: Book[]

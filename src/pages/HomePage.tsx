@@ -1,8 +1,8 @@
 import { BookOpen, FileText, Loader2, Upload } from 'lucide-react'
 import { Stat } from '../components/ui/Metrics'
 import { formatPercent } from '../lib/format'
-import type { AppData, Book, Unit } from '../App'
 import type { View } from '../navigation'
+import type { AppData, Book, Unit } from '../types/domain'
 
 type HomePageProps = {
   data: AppData
