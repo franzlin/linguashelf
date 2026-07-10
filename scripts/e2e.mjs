@@ -1,13 +1,17 @@
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
+import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { chromium } from 'playwright'
 import JSZip from 'jszip'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const execFileAsync = promisify(execFile)
 const root = path.resolve(__dirname, '..')
 const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-e2e-'))
 const port = 5317 + Math.floor(Math.random() * 600)
@@ -28,6 +32,7 @@ const server = spawn(process.execPath, ['server/index.js', '--prod'], {
     INITIAL_ADMIN_EMAIL: email,
     INITIAL_ADMIN_PASSWORD: password,
     MAX_AUTO_FAILURE_RETRIES: '0',
+    PDF_OCR_ENABLED: 'false',
     STORAGE_DRIVER: 'sqlite',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -54,8 +59,8 @@ async function waitForServer() {
   throw new Error(`E2E server did not start.\n${serverOutput}`)
 }
 
-async function makeEpub() {
-  const file = path.join(dataDir, 'e2e-sample.epub')
+async function makeEpub(filename = 'e2e-sample.epub', title = 'E2E History Reader') {
+  const file = path.join(dataDir, filename)
   const zip = new JSZip()
   zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' })
   zip.file(
@@ -72,7 +77,7 @@ async function makeEpub() {
     'OEBPS/content.opf',
     `<?xml version="1.0" encoding="utf-8"?>
 <package version="3.0" unique-identifier="bookid" xmlns="http://www.idpf.org/2007/opf">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>E2E History Reader</dc:title><dc:creator>LinguaShelf Test</dc:creator><dc:language>en</dc:language><dc:identifier id="bookid">e2e</dc:identifier></metadata>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${title}</dc:title><dc:creator>LinguaShelf Test</dc:creator><dc:language>en</dc:language><dc:identifier id="bookid">${filename}</dc:identifier></metadata>
   <manifest><item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
   <spine><itemref idref="c1"/></spine>
 </package>`
@@ -83,6 +88,153 @@ async function makeEpub() {
     throw new Error('E2E EPUB unexpectedly matches the old fixed-offset check')
   }
   return file
+}
+
+function makeBlankPdf() {
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Contents 4 0 R >>',
+    '<< /Length 0 >>\nstream\n\nendstream',
+  ]
+  let output = '%PDF-1.4\n'
+  const offsets = [0]
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(output))
+    output += `${index + 1} 0 obj\n${object}\nendobj\n`
+  })
+  const xrefOffset = Buffer.byteLength(output)
+  output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  for (let index = 1; index <= objects.length; index += 1) {
+    output += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`
+  }
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
+  return Buffer.from(output)
+}
+
+async function verifyAtomicRestoreFailure() {
+  const restoreRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-restore-atomic-'))
+  const targetDataDir = path.join(restoreRoot, 'data')
+  const invalidBackup = path.join(restoreRoot, 'invalid-backup.zip')
+  await fs.mkdir(targetDataDir, { recursive: true })
+  await fs.writeFile(path.join(targetDataDir, 'db.json'), JSON.stringify({ marker: 'original-data' }), 'utf8')
+  const zip = new JSZip()
+  zip.file('data/db.json', '{ invalid json')
+  await fs.writeFile(invalidBackup, await zip.generateAsync({ type: 'nodebuffer' }))
+
+  let failed = false
+  try {
+    await execFileAsync(process.execPath, [path.join(root, 'scripts', 'restore.mjs'), invalidBackup], {
+      cwd: root,
+      env: { ...process.env, DATA_DIR: targetDataDir },
+      timeout: 30_000,
+    })
+  } catch {
+    failed = true
+  }
+  if (!failed) throw new Error('Invalid restore unexpectedly succeeded')
+  const original = JSON.parse(await fs.readFile(path.join(targetDataDir, 'db.json'), 'utf8'))
+  if (original.marker !== 'original-data') throw new Error('Failed restore replaced the original data directory')
+
+  const validBackup = path.join(restoreRoot, 'valid-backup.zip')
+  const validZip = new JSZip()
+  validZip.file('data/db.json', JSON.stringify({ users: [{ id: 'restored-user' }], sessions: [] }))
+  await fs.writeFile(validBackup, await validZip.generateAsync({ type: 'nodebuffer' }))
+  await execFileAsync(process.execPath, [path.join(root, 'scripts', 'restore.mjs'), validBackup], {
+    cwd: root,
+    env: { ...process.env, DATA_DIR: targetDataDir },
+    timeout: 30_000,
+  })
+  const restored = JSON.parse(await fs.readFile(path.join(targetDataDir, 'db.json'), 'utf8'))
+  if (restored.users?.[0]?.id !== 'restored-user') throw new Error('Validated restore did not replace the data directory')
+  const safetyDirectories = (await fs.readdir(restoreRoot)).filter((name) => name.startsWith('data-before-restore-'))
+  if (!safetyDirectories.length) throw new Error('Successful restore did not preserve the previous data directory')
+  await fs.rm(restoreRoot, { recursive: true, force: true })
+}
+
+async function verifyExternalRequestTimeout() {
+  const hangingServer = createServer(() => undefined)
+  await new Promise((resolve, reject) => {
+    hangingServer.once('error', reject)
+    hangingServer.listen(0, '127.0.0.1', resolve)
+  })
+  const hangingPort = hangingServer.address().port
+  const timeoutDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-timeout-e2e-'))
+  const timeoutPort = 6100 + Math.floor(Math.random() * 500)
+  const timeoutBaseUrl = `http://127.0.0.1:${timeoutPort}`
+  const timeoutApp = spawn(process.execPath, ['server/index.js', '--prod'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PORT: String(timeoutPort),
+      DATA_DIR: timeoutDataDir,
+      STORAGE_DRIVER: 'sqlite',
+      AI_PROVIDER: 'auto',
+      OPENAI_API_KEY: 'timeout-test-key',
+      OPENAI_BASE_URL: `http://127.0.0.1:${hangingPort}/v1`,
+      AI_TEXT_REQUEST_TIMEOUT_MS: '1000',
+      ALLOW_SIGNUP: 'false',
+      INITIAL_ADMIN_EMAIL: 'timeout-admin@example.com',
+      INITIAL_ADMIN_PASSWORD: 'timeout-reader-123',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  timeoutApp.stdout.on('data', (chunk) => (output += chunk.toString()))
+  timeoutApp.stderr.on('data', (chunk) => (output += chunk.toString()))
+
+  try {
+    let ready = false
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      try {
+        const response = await fetch(`${timeoutBaseUrl}/api/health`)
+        if (response.ok) {
+          ready = true
+          break
+        }
+      } catch {
+        undefined
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    if (!ready) throw new Error(`Timeout test app did not start: ${output}`)
+
+    const login = await fetch(`${timeoutBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'timeout-admin@example.com', password: 'timeout-reader-123' }),
+    })
+    const loginPayload = await login.json()
+    if (!login.ok || !loginPayload.token) throw new Error(`Timeout test login failed: ${JSON.stringify(loginPayload)}`)
+
+    const startedAt = Date.now()
+    const testResponse = await fetch(`${timeoutBaseUrl}/api/ai/services/text-ai/test`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${loginPayload.token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const payload = await testResponse.json()
+    const elapsedMs = Date.now() - startedAt
+    if (!testResponse.ok || payload.check?.status !== 'failed' || !String(payload.check?.message || '').includes('超时')) {
+      throw new Error(`Hanging upstream was not classified as a timeout: ${elapsedMs}ms ${JSON.stringify(payload.check)}`)
+    }
+    if (elapsedMs < 800 || elapsedMs > 5000) throw new Error(`Configured upstream timeout fired at an unexpected time: ${elapsedMs}ms`)
+  } finally {
+    const exited = new Promise((resolve) => timeoutApp.once('exit', resolve))
+    timeoutApp.kill()
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5000))])
+    hangingServer.closeAllConnections?.()
+    await new Promise((resolve) => hangingServer.close(resolve))
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        await fs.rm(timeoutDataDir, { recursive: true, force: true })
+        break
+      } catch (error) {
+        if (!['EBUSY', 'EPERM'].includes(error?.code) || attempt === 19) throw error
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+  }
 }
 
 function makeSilentWav(durationMs = 3000) {
@@ -202,7 +354,10 @@ function insertFailedPodcastTask() {
 let browser
 try {
   await waitForServer()
+  await verifyAtomicRestoreFailure()
+  await verifyExternalRequestTimeout()
   const epubPath = await makeEpub()
+  const secondEpubPath = await makeEpub('e2e-sample-two.epub', 'E2E Second Reader')
   browser = await chromium.launch({ headless: true })
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   await page.goto(baseUrl, { waitUntil: 'networkidle' })
@@ -212,6 +367,59 @@ try {
   await page.getByRole('heading', { name: '首页' }).waitFor()
   const token = await page.evaluate(() => localStorage.getItem('linguashelf-token'))
   if (!token) throw new Error('Login did not persist a session token')
+
+  const authDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
+  try {
+    const session = JSON.parse(authDb.prepare("SELECT payload FROM records WHERE collection='sessions' LIMIT 1").get().payload)
+    const user = JSON.parse(authDb.prepare("SELECT payload FROM records WHERE collection='users' LIMIT 1").get().payload)
+    if (session.token) throw new Error('Session token was stored in plaintext')
+    if (session.tokenHash !== crypto.createHash('sha256').update(token).digest('hex')) throw new Error('Stored session token hash does not match')
+    if (!String(user.passwordHash || '').startsWith('pbkdf2-sha256$600000$')) throw new Error('Password hash did not use the upgraded PBKDF2 format')
+  } finally {
+    authDb.close()
+  }
+
+  const legacyUserId = 'e2e-legacy-user'
+  const legacyPassword = 'legacy-reader-123'
+  const legacySalt = crypto.randomBytes(16).toString('hex')
+  const legacyHash = crypto.pbkdf2Sync(legacyPassword, legacySalt, 100000, 32, 'sha256').toString('hex')
+  const legacyDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
+  try {
+    upsert(legacyDb, 'users', legacyUserId, {
+      id: legacyUserId,
+      email: 'legacy@example.com',
+      name: 'legacy',
+      passwordHash: `${legacySalt}:${legacyHash}`,
+      role: 'user',
+      createdAt: new Date().toISOString(),
+    })
+  } finally {
+    legacyDb.close()
+  }
+  const legacyLoginResponse = await page.request.post(`${baseUrl}/api/auth/login`, {
+    data: { email: 'legacy@example.com', password: legacyPassword },
+  })
+  const legacyLoginPayload = await legacyLoginResponse.json()
+  if (!legacyLoginResponse.ok() || !legacyLoginPayload.token) throw new Error(`Legacy password login failed: ${JSON.stringify(legacyLoginPayload)}`)
+  const upgradedDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'), { readOnly: true })
+  try {
+    const upgradedUser = JSON.parse(upgradedDb.prepare("SELECT payload FROM records WHERE collection='users' AND id=?").get(legacyUserId).payload)
+    const upgradedSession = JSON.parse(
+      upgradedDb.prepare("SELECT payload FROM records WHERE collection='sessions' AND payload LIKE ? ORDER BY updatedAt DESC LIMIT 1").get(`%${legacyUserId}%`).payload
+    )
+    if (!String(upgradedUser.passwordHash || '').startsWith('pbkdf2-sha256$600000$')) throw new Error('Legacy password hash was not upgraded on login')
+    if (upgradedSession.token || upgradedSession.tokenHash !== crypto.createHash('sha256').update(legacyLoginPayload.token).digest('hex')) {
+      throw new Error('Legacy-user session was not stored as a token hash')
+    }
+  } finally {
+    upgradedDb.close()
+  }
+
+  const readyResponse = await page.request.get(`${baseUrl}/api/ready`)
+  const readyPayload = await readyResponse.json()
+  if (!readyResponse.ok() || JSON.stringify(readyPayload) !== JSON.stringify({ ok: true })) {
+    throw new Error(`Readiness endpoint exposed unexpected data: ${JSON.stringify(readyPayload)}`)
+  }
 
   const zeroGoalResponse = await page.request.patch(`${baseUrl}/api/settings`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -236,6 +444,73 @@ try {
   await page.getByText('E2E History Reader').waitFor({ timeout: 15000 })
   await page.screenshot({ path: path.join(screenshotDir, 'library-upload.png'), fullPage: true })
 
+  const ocrUploadStartedAt = Date.now()
+  const ocrUploadResponse = await page.request.post(`${baseUrl}/api/books/upload`, {
+    headers: { Authorization: `Bearer ${token}` },
+    multipart: {
+      file: {
+        name: 'background-ocr.pdf',
+        mimeType: 'application/pdf',
+        buffer: makeBlankPdf(),
+      },
+    },
+  })
+  const ocrUploadPayload = await ocrUploadResponse.json()
+  if (ocrUploadResponse.status() !== 202 || ocrUploadPayload.job?.type !== 'parse-pdf-ocr' || ocrUploadPayload.book?.status !== 'processing') {
+    throw new Error(`Scanned PDF was not queued for background OCR: ${ocrUploadResponse.status()} ${JSON.stringify(ocrUploadPayload)}`)
+  }
+  if (Date.now() - ocrUploadStartedAt > 5000) throw new Error('Scanned PDF upload waited too long for OCR')
+  let ocrJobPayload = ocrUploadPayload
+  for (let attempt = 0; attempt < 30 && !['failed', 'succeeded'].includes(ocrJobPayload.job.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    ocrJobPayload = await (
+      await page.request.get(`${baseUrl}/api/jobs/${ocrUploadPayload.job.id}`, { headers: { Authorization: `Bearer ${token}` } })
+    ).json()
+  }
+  if (ocrJobPayload.job.status !== 'failed' || ocrJobPayload.job.errorStage !== '扫描 PDF 解析') {
+    throw new Error(`Background OCR failure was not diagnosed correctly: ${JSON.stringify(ocrJobPayload.job)}`)
+  }
+  const deleteOcrBookResponse = await page.request.delete(`${baseUrl}/api/books/${ocrUploadPayload.book.id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!deleteOcrBookResponse.ok()) throw new Error(`Failed to clean up OCR E2E book: ${deleteOcrBookResponse.status()}`)
+
+  const secondUploadResponse = await page.request.post(`${baseUrl}/api/books/upload`, {
+    headers: { Authorization: `Bearer ${token}` },
+    multipart: {
+      file: {
+        name: 'e2e-sample-two.epub',
+        mimeType: 'application/epub+zip',
+        buffer: await fs.readFile(secondEpubPath),
+      },
+    },
+  })
+  if (!secondUploadResponse.ok()) throw new Error(`Second EPUB upload failed: ${secondUploadResponse.status()} ${await secondUploadResponse.text()}`)
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.getByText('E2E Second Reader').waitFor()
+  const booksForRace = await (await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })).json()
+  const firstRaceBook = booksForRace.books.find((book) => book.title === 'E2E History Reader')
+  let delayedBookRequestSeen = false
+  await page.route(`**/api/books/${firstRaceBook.id}`, async (route) => {
+    delayedBookRequestSeen = true
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await route.continue().catch(() => undefined)
+  })
+  await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.locator('.book-card').filter({ hasText: 'E2E Second Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.locator('.detail-head h1').filter({ hasText: 'E2E Second Reader' }).waitFor()
+  await page.waitForTimeout(650)
+  if (!delayedBookRequestSeen || !(await page.locator('.detail-head h1').filter({ hasText: 'E2E Second Reader' }).count())) {
+    throw new Error('A delayed book response overwrote the most recently opened book')
+  }
+  await page.unroute(`**/api/books/${firstRaceBook.id}`)
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.getByRole('heading', { name: '学习单元' }).waitFor()
+
   if (!(await page.getByRole('heading', { name: '学习单元' }).count())) {
     await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
     await page.getByRole('heading', { name: '学习单元' }).waitFor()
@@ -244,6 +519,71 @@ try {
   await page.getByRole('heading', { name: '分级阅读' }).waitFor({ timeout: 20000 })
   await page.getByRole('heading', { name: '听力预热' }).waitFor()
   await page.screenshot({ path: path.join(screenshotDir, 'study-generated.png'), fullPage: true })
+
+  let progressRequestsInFlight = 0
+  let maxProgressRequestsInFlight = 0
+  const progressBodies = []
+  await page.route('**/api/units/*/progress', async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.continue()
+      return
+    }
+    progressRequestsInFlight += 1
+    maxProgressRequestsInFlight = Math.max(maxProgressRequestsInFlight, progressRequestsInFlight)
+    progressBodies.push(route.request().postDataJSON())
+    const response = await route.fetch()
+    if (progressBodies.length === 1) await new Promise((resolve) => setTimeout(resolve, 350))
+    await route.fulfill({ response })
+    progressRequestsInFlight -= 1
+  })
+  const studyQuestions = page.locator('.question-item')
+  await studyQuestions.nth(0).locator('.options-grid button').nth(0).click()
+  await studyQuestions.nth(1).locator('.options-grid button').nth(0).click()
+  await page.getByRole('button', { name: '已同步' }).waitFor({ timeout: 5000 })
+  await page.unroute('**/api/units/*/progress')
+  if (maxProgressRequestsInFlight !== 1) throw new Error(`Progress saves were not serialized: max in flight ${maxProgressRequestsInFlight}`)
+  if (progressBodies.length < 2 || Object.keys(progressBodies.at(-1)?.answers || {}).length < 2) {
+    throw new Error(`Latest progress save did not contain all answers: ${JSON.stringify(progressBodies)}`)
+  }
+
+  const appBeforeCompletion = await (await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })).json()
+  const uploadedBook = appBeforeCompletion.books.find((book) => book.title === 'E2E History Reader')
+  const uploadedBookDetail = await (
+    await page.request.get(`${baseUrl}/api/books/${uploadedBook.id}`, { headers: { Authorization: `Bearer ${token}` } })
+  ).json()
+  const generatedUnit = uploadedBookDetail.units[0]
+  const correctAnswers = Object.fromEntries(generatedUnit.content.questions.map((question) => [question.id, question.answerIndex]))
+  const completeOptions = {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { answers: correctAnswers, viewedWords: [], listeningCompleted: true },
+  }
+  const [unitCompleteFirst, unitCompleteSecond] = await Promise.all([
+    page.request.post(`${baseUrl}/api/units/${generatedUnit.id}/complete`, completeOptions),
+    page.request.post(`${baseUrl}/api/units/${generatedUnit.id}/complete`, completeOptions),
+  ])
+  const [unitCompleteFirstPayload, unitCompleteSecondPayload] = await Promise.all([unitCompleteFirst.json(), unitCompleteSecond.json()])
+  if (unitCompleteFirstPayload.report.id !== unitCompleteSecondPayload.report.id) {
+    throw new Error(`Concurrent unit completion created duplicate reports: ${JSON.stringify([unitCompleteFirstPayload, unitCompleteSecondPayload])}`)
+  }
+  if ([unitCompleteFirstPayload.duplicate, unitCompleteSecondPayload.duplicate].filter(Boolean).length !== 1) {
+    throw new Error('Concurrent unit completion did not return one original and one duplicate response')
+  }
+  if (unitCompleteFirstPayload.report.newVocabularyCount !== 0) {
+    throw new Error(`Unit completion added unviewed vocabulary: ${JSON.stringify(unitCompleteFirstPayload.report)}`)
+  }
+  const appAfterCompletion = await (await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })).json()
+  if (appAfterCompletion.reports.filter((report) => report.unitId === generatedUnit.id).length !== 1) {
+    throw new Error('Duplicate unit reports were persisted')
+  }
+  if (appAfterCompletion.vocabulary.length !== 0) throw new Error(`Unviewed lesson vocabulary was saved: ${JSON.stringify(appAfterCompletion.vocabulary)}`)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileStudyMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  if (mobileStudyMetrics.scrollWidth > mobileStudyMetrics.width) {
+    throw new Error(`Mobile study page overflows horizontally: ${JSON.stringify(mobileStudyMetrics)}`)
+  }
+  await page.screenshot({ path: path.join(screenshotDir, 'mobile-study-sync.png'), fullPage: true })
+  await page.setViewportSize({ width: 1280, height: 900 })
 
   await page.getByLabel('主导航').getByRole('button', { name: '轻练' }).click()
   await page.getByRole('heading', { name: '每日轻练' }).waitFor()

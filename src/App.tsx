@@ -80,6 +80,9 @@ type Book = {
   totalUnits: number
   generatedUnits: number
   completedUnits: number
+  status?: 'ready' | 'processing' | 'failed'
+  error?: string
+  processingJobId?: string
   createdAt: string
   glossary?: BookGlossary
 }
@@ -369,6 +372,8 @@ type GenerationJob = {
   unitId?: string
   podcastId?: string
   bookId: string
+  processedPages?: number
+  totalPages?: number
   progress: number
   message: string
   error: string
@@ -1103,6 +1108,7 @@ export function App() {
   const [error, setError] = useState('')
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const jobWatchAbortRef = useRef<AbortController | null>(null)
+  const bookRequestAbortRef = useRef<AbortController | null>(null)
   const isAdmin = data?.user.role === 'admin'
 
   async function refresh(activeToken = token) {
@@ -1125,8 +1131,19 @@ export function App() {
     refresh()
   }, [])
 
+  const processingBookKey = data?.books.filter((book) => book.status === 'processing').map((book) => book.id).join(',') || ''
+
   useEffect(() => {
-    return () => jobWatchAbortRef.current?.abort()
+    if (view !== 'library' || !token || !processingBookKey) return
+    const timer = window.setInterval(() => refresh(token), 5000)
+    return () => window.clearInterval(timer)
+  }, [view, token, processingBookKey])
+
+  useEffect(() => {
+    return () => {
+      jobWatchAbortRef.current?.abort()
+      bookRequestAbortRef.current?.abort()
+    }
   }, [])
 
   useEffect(() => {
@@ -1156,17 +1173,24 @@ export function App() {
   }
 
   async function openBook(book: Book) {
+    bookRequestAbortRef.current?.abort()
+    const controller = new AbortController()
+    bookRequestAbortRef.current = controller
     setSelectedBook(book)
     setSelectedUnit(null)
     setLatestReport(null)
     setView('book')
     try {
-      const detail = await requestJson<{ book: Book; units: Unit[] }>(`/api/books/${book.id}`, token)
+      const detail = await requestJson<{ book: Book; units: Unit[] }>(`/api/books/${book.id}`, token, { signal: controller.signal })
+      if (controller.signal.aborted) return
       setSelectedBook(detail.book)
       setBookUnits(detail.units)
       setError('')
     } catch (err) {
+      if (controller.signal.aborted) return
       setError(err instanceof Error ? err.message : '无法打开书籍')
+    } finally {
+      if (bookRequestAbortRef.current === controller) bookRequestAbortRef.current = null
     }
   }
 
@@ -1344,6 +1368,7 @@ export function App() {
 
   async function logout() {
     jobWatchAbortRef.current?.abort()
+    bookRequestAbortRef.current?.abort()
     try {
       await requestJson('/api/logout', token, { method: 'POST', body: JSON.stringify({}) })
     } catch {
@@ -1417,6 +1442,10 @@ export function App() {
             token={token}
             onUploaded={(book) => {
               refresh()
+              if (book.status === 'processing') {
+                setView('library')
+                return
+              }
               openBook(book)
             }}
             onOpenBook={openBook}
@@ -2107,6 +2136,7 @@ function LibraryView({
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [deletingBookId, setDeletingBookId] = useState('')
+  const [uploadNotice, setUploadNotice] = useState('')
 
   async function uploadFile(file: File) {
     const lowerName = file.name.toLowerCase()
@@ -2119,10 +2149,15 @@ function LibraryView({
     try {
       const form = new FormData()
       form.append('file', file)
-      const result = await requestJson<{ book: Book }>('/api/books/upload', token, {
+      const result = await requestJson<{ book: Book; job?: GenerationJob }>('/api/books/upload', token, {
         method: 'POST',
         body: form,
       })
+      setUploadNotice(
+        result.book.status === 'processing'
+          ? `《${result.book.title}》已上传，扫描 PDF 正在后台 OCR。可以离开本页，进度会保存在任务中心。`
+          : `《${result.book.title}》已导入。`
+      )
       onUploaded(result.book)
     } catch (err) {
       onError(err instanceof Error ? err.message : '上传失败')
@@ -2201,6 +2236,16 @@ function LibraryView({
         />
       </div>
 
+      {uploadNotice && (
+        <div className="notice success">
+          <Check size={18} />
+          <span>{uploadNotice}</span>
+          <button className="icon-button" type="button" onClick={() => setUploadNotice('')} aria-label="关闭">
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
       <section
         className={`upload-dropzone${dragActive ? ' active' : ''}${uploading ? ' busy' : ''}`}
         role="button"
@@ -2236,9 +2281,15 @@ function LibraryView({
             const progress = book.totalUnits ? book.completedUnits / book.totalUnits : 0
             return (
               <article key={book.id} className="book-card">
-                <div className="book-type">{book.type.toUpperCase()}</div>
+                <div className="book-card-status">
+                  <div className="book-type">{book.type.toUpperCase()}</div>
+                  {book.status === 'processing' && <span className="status-pill running">OCR 处理中</span>}
+                  {book.status === 'failed' && <span className="status-pill failed">解析失败</span>}
+                </div>
                 <h2>{book.title}</h2>
                 <p>{book.author || book.filename}</p>
+                {book.status === 'processing' && <p className="book-processing-note">后台识别中，可在任务中心查看页数进度。</p>}
+                {book.status === 'failed' && book.error && <p className="book-error-note">{book.error}</p>}
                 <div className="book-meta">
                   <span>{formatNumber(book.wordCount)} 词</span>
                   <span>{book.totalUnits} 个单元</span>
@@ -2249,8 +2300,8 @@ function LibraryView({
                 <div className="book-actions">
                   <span>{book.completedUnits}/{book.totalUnits} 完成</span>
                   <div className="book-action-buttons">
-                    <button type="button" onClick={() => onOpenBook(book)}>
-                      打开
+                    <button type="button" onClick={() => onOpenBook(book)} disabled={book.status !== undefined && book.status !== 'ready'}>
+                      {book.status === 'processing' ? '解析中' : book.status === 'failed' ? '待重试' : '打开'}
                     </button>
                     <button className="danger-button" type="button" onClick={() => deleteFromLibrary(book)} disabled={deletingBookId === book.id}>
                       {deletingBookId === book.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
@@ -3051,10 +3102,22 @@ function StudyView({
   const [showQualityIssues, setShowQualityIssues] = useState(false)
   const [studyMode, setStudyMode] = useState<'learn' | 'review'>(settings.focusStudyMode === false ? 'review' : 'learn')
   const [dynamicDefinitions, setDynamicDefinitions] = useState<Record<string, VocabularyItem>>({})
+  const [progressSyncStatus, setProgressSyncStatus] = useState<'saved' | 'saving' | 'error'>('saved')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef('')
   const qualityIssuesRef = useRef<HTMLDivElement | null>(null)
+  const progressSaveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const progressPendingRef = useRef(0)
+  const progressMountedRef = useRef(true)
+  const activeUnitIdRef = useRef(unit.id)
+  const latestProgressRef = useRef<UnitProgress>({
+    paragraphIndex: Number(unit.progress?.paragraphIndex || 0),
+    listeningCompleted: Boolean(unit.progress?.listeningCompleted),
+    answers: unit.progress?.answers || {},
+    completed: Boolean(unit.progress?.completed),
+    updatedAt: unit.progress?.updatedAt,
+  })
   const content = unit.content
   const qualityAudit = unit.quality?.fidelity?.audit
   const unsupportedClaims = qualityAudit?.unsupportedClaims || []
@@ -3069,12 +3132,28 @@ function StudyView({
   const reviewMode = studyMode === 'review'
 
   useEffect(() => {
+    activeUnitIdRef.current = unit.id
     setAnswers(unit.progress?.answers || {})
     setListeningCompleted(Boolean(unit.progress?.listeningCompleted))
     setCurrentParagraph(Number(unit.progress?.paragraphIndex || 0))
+    latestProgressRef.current = {
+      paragraphIndex: Number(unit.progress?.paragraphIndex || 0),
+      listeningCompleted: Boolean(unit.progress?.listeningCompleted),
+      answers: unit.progress?.answers || {},
+      completed: Boolean(unit.progress?.completed),
+      updatedAt: unit.progress?.updatedAt,
+    }
+    setProgressSyncStatus('saved')
     setShowQualityIssues(false)
     setStudyMode(settings.focusStudyMode === false ? 'review' : 'learn')
   }, [unit.id, unit.progress?.updatedAt, settings.focusStudyMode])
+
+  useEffect(() => {
+    progressMountedRef.current = true
+    return () => {
+      progressMountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!content || currentParagraph <= 0) return
@@ -3136,15 +3215,37 @@ function StudyView({
 
   const answeredAll = content.questions.every((question) => answers[question.id] !== undefined)
 
-  async function saveProgress(partial: Partial<UnitProgress>) {
-    try {
-      await requestJson(`/api/units/${unit.id}/progress`, token, {
-        method: 'PATCH',
-        body: JSON.stringify(partial),
+  function saveProgress(partial: Partial<UnitProgress>) {
+    const snapshot = { ...latestProgressRef.current, ...partial }
+    latestProgressRef.current = snapshot
+    progressPendingRef.current += 1
+    setProgressSyncStatus('saving')
+    const unitId = unit.id
+    const operation = progressSaveChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const result = await requestJson<{ progress: UnitProgress }>(`/api/units/${unitId}/progress`, token, {
+          method: 'PATCH',
+          body: JSON.stringify(snapshot),
+        })
+        if (activeUnitIdRef.current === unitId) latestProgressRef.current = { ...snapshot, ...result.progress }
       })
-    } catch {
-      undefined
-    }
+      .then(
+        () => {
+          progressPendingRef.current = Math.max(0, progressPendingRef.current - 1)
+          if (progressMountedRef.current && activeUnitIdRef.current === unitId && progressPendingRef.current === 0) setProgressSyncStatus('saved')
+        },
+        () => {
+          progressPendingRef.current = Math.max(0, progressPendingRef.current - 1)
+          if (progressMountedRef.current && activeUnitIdRef.current === unitId) setProgressSyncStatus('error')
+        }
+      )
+    progressSaveChainRef.current = operation
+    return operation
+  }
+
+  function retryProgressSync() {
+    saveProgress(latestProgressRef.current)
   }
 
   function markParagraph(index: number) {
@@ -3360,6 +3461,7 @@ function StudyView({
   async function completeUnit() {
     setBusy(true)
     try {
+      await progressSaveChainRef.current
       const result = await requestJson<{ report: Report }>(`/api/units/${unit.id}/complete`, token, {
         method: 'POST',
         body: JSON.stringify({ answers, viewedWords: [...viewedWords], listeningCompleted }),
@@ -3446,16 +3548,28 @@ function StudyView({
             <h1>{content.title}</h1>
             <p>{content.sourceLocation}</p>
           </div>
-          <div className="study-mode-switch">
-            <Segmented
-              ariaLabel="学习页模式"
-              options={['学习模式', '审稿模式']}
-              value={reviewMode ? '审稿模式' : '学习模式'}
-              onChange={(value) => {
-                setStudyMode(value === '审稿模式' ? 'review' : 'learn')
-                if (value === '学习模式') setShowQualityIssues(false)
-              }}
-            />
+          <div className="study-head-tools">
+            <button
+              className={`progress-sync ${progressSyncStatus}`}
+              type="button"
+              onClick={progressSyncStatus === 'error' ? retryProgressSync : undefined}
+              disabled={progressSyncStatus !== 'error'}
+              title={progressSyncStatus === 'error' ? '点击重试同步' : '学习进度同步状态'}
+            >
+              {progressSyncStatus === 'saving' ? <Loader2 className="spin" size={14} /> : progressSyncStatus === 'error' ? <RotateCcw size={14} /> : <Check size={14} />}
+              {progressSyncStatus === 'saving' ? '保存中' : progressSyncStatus === 'error' ? '同步失败，重试' : '已同步'}
+            </button>
+            <div className="study-mode-switch">
+              <Segmented
+                ariaLabel="学习页模式"
+                options={['学习模式', '审稿模式']}
+                value={reviewMode ? '审稿模式' : '学习模式'}
+                onChange={(value) => {
+                  setStudyMode(value === '审稿模式' ? 'review' : 'learn')
+                  if (value === '学习模式') setShowQualityIssues(false)
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -4467,6 +4581,7 @@ function TasksView({ token, isAdmin, onNavigate, onChanged }: { token: string; i
             ['all', '全部类型'],
             ['generate-unit', '分级阅读'],
             ['generate-podcast', '播客'],
+            ['parse-pdf-ocr', 'PDF OCR'],
           ].map(([value, label]) => (
             <button key={value} type="button" className={typeFilter === value ? 'active' : ''} onClick={() => setTypeFilter(value)}>
               {label}
@@ -4508,6 +4623,7 @@ function TasksView({ token, isAdmin, onNavigate, onChanged }: { token: string; i
                 <div className="task-meta">
                   <span>{jobTypeLabel(job.type)}</span>
                   {job.provider && <span>{job.provider}</span>}
+                  {Boolean(job.totalPages) && <span>页数 {job.processedPages || 0}/{job.totalPages}</span>}
                   {job.createdAt && <span>{formatDateTime(job.createdAt)}</span>}
                   {Number(job.retryCount || 0) > 0 && <span>已重试 {job.retryCount} 次</span>}
                 </div>
@@ -4981,6 +5097,7 @@ function jobTypeLabel(type: string) {
   const labels: Record<string, string> = {
     'generate-unit': '分级阅读',
     'generate-podcast': '播客',
+    'parse-pdf-ocr': 'PDF OCR',
   }
   return labels[type] || type
 }

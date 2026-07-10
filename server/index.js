@@ -32,6 +32,7 @@ const sessionDays = Number(process.env.SESSION_DAYS || 30)
 const loginWindowMs = Number(process.env.LOGIN_WINDOW_MINUTES || 10) * 60 * 1000
 const loginMaxFailures = Number(process.env.LOGIN_MAX_FAILURES || 8)
 const passwordMinLength = Math.max(8, Number(process.env.PASSWORD_MIN_LENGTH || 8))
+const passwordPbkdf2Iterations = Math.max(600_000, Number(process.env.PASSWORD_PBKDF2_ITERATIONS) || 600_000)
 const maxAutoRegenAttempts = Number(process.env.MAX_AUTO_REGEN_ATTEMPTS || 1)
 const maxAutoFailureRetries = Math.max(0, Number(process.env.MAX_AUTO_FAILURE_RETRIES || 2))
 const autoFailureRetryBaseSeconds = Math.max(30, Number(process.env.AUTO_FAILURE_RETRY_BASE_SECONDS || 180))
@@ -54,6 +55,9 @@ const pdfOcrVisionApiKey = String(process.env.PDF_OCR_VISION_API_KEY || process.
 const pdfOcrVisionDpi = Math.max(90, Math.min(220, Number(process.env.PDF_OCR_VISION_DPI || 110)))
 const pdfOcrVisionMinWords = Math.max(10, Number(process.env.PDF_OCR_VISION_MIN_WORDS || 40))
 const pdfSectionTargetWords = Math.max(1200, Number(process.env.PDF_SECTION_TARGET_WORDS || 3400))
+const aiTextRequestTimeoutMs = Math.max(1_000, Number(process.env.AI_TEXT_REQUEST_TIMEOUT_MS) || 120_000)
+const ttsRequestTimeoutMs = Math.max(1_000, Number(process.env.TTS_REQUEST_TIMEOUT_MS) || 180_000)
+const ocrHttpRequestTimeoutMs = Math.max(1_000, Number(process.env.OCR_HTTP_REQUEST_TIMEOUT_MS) || 120_000)
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MINUTES || 60) * 60 * 1000
 const podcastLexileDefault = Number(process.env.PODCAST_LEXILE_DEFAULT || 900)
 const podcastLexileMin = 500
@@ -89,10 +93,14 @@ const loginAttempts = new Map()
 const actionRateBuckets = new Map()
 const geminiTtsProviderCooldowns = new Map()
 const microCompletionLocks = new Map()
+const unitCompletionLocks = new Map()
+const unitProgressLocks = new Map()
+const ocrSlotWaiters = []
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
 let writeChain = Promise.resolve()
 let activeOcrTasks = 0
 let geminiOfficialTtsCursor = 0
+let ocrJobQueueActive = false
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -323,7 +331,7 @@ function attachSnapshotMeta(db, meta) {
 
 function recordId(collection, item, index) {
   if (item?.id) return String(item.id)
-  if (collection === 'sessions' && item?.token) return String(item.token)
+  if (collection === 'sessions' && (item?.tokenHash || item?.token)) return String(item.tokenHash || item.token)
   if (collection === 'settings' && item?.userId) return String(item.userId)
   if (collection === 'progress' && item?.userId && item?.unitId) return progressKey(item.userId, item.unitId)
   if (collection === 'definitions' && item?.key) return `${item.userId || 'global'}:${item.key}`
@@ -332,15 +340,8 @@ function recordId(collection, item, index) {
 
 async function storageHealth() {
   await ensureStore()
-  const db = await readDb()
-  return {
-    ok: true,
-    storageDriver,
-    sqlite: storageDriver === 'sqlite',
-    books: db.books.length,
-    units: db.units.length,
-    jobs: db.jobs.filter((job) => ['queued', 'running'].includes(job.status)).length,
-  }
+  await readDb()
+  return { ok: true }
 }
 
 function closeStore() {
@@ -358,6 +359,36 @@ function openAiCompatibleBaseUrl(value) {
   const base = String(value || '').replace(/\/+$/, '')
   if (!base) return ''
   return base.endsWith('/v1') ? base : `${base}/v1`
+}
+
+async function fetchWithTimeout(url, options, timeoutMs, label) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  timer.unref?.()
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`${label}请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+      timeoutError.code = 'UPSTREAM_TIMEOUT'
+      throw timeoutError
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function fetchTextService(url, options) {
+  return fetchWithTimeout(url, options, aiTextRequestTimeoutMs, 'AI 文本服务')
+}
+
+function fetchTtsService(url, options) {
+  return fetchWithTimeout(url, options, ttsRequestTimeoutMs, 'TTS 服务')
+}
+
+function fetchOcrService(url, options) {
+  return fetchWithTimeout(url, options, ocrHttpRequestTimeoutMs, 'OCR 服务')
 }
 
 function bytesFromMegabytes(value, fallbackMb) {
@@ -539,18 +570,44 @@ async function ensureInitialAdmin() {
   await writeDb(db)
 }
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const hash = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex')
-  return `${salt}:${hash}`
+function derivePasswordHash(password, salt, iterations) {
+  return crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('hex')
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex'), iterations = passwordPbkdf2Iterations) {
+  const hash = derivePasswordHash(password, salt, iterations)
+  return `pbkdf2-sha256$${iterations}$${salt}$${hash}`
 }
 
 function verifyPassword(password, stored) {
-  const [salt, hash] = String(stored || '').split(':')
-  if (!salt || !hash) return false
-  const candidate = hashPassword(password, salt).split(':')[1]
+  const value = String(stored || '')
+  let salt = ''
+  let hash = ''
+  let iterations = 100_000
+  if (value.startsWith('pbkdf2-sha256$')) {
+    const [, rawIterations, storedSalt, storedHash] = value.split('$')
+    iterations = Number(rawIterations)
+    salt = storedSalt
+    hash = storedHash
+  } else {
+    ;[salt, hash] = value.split(':')
+  }
+  if (!salt || !hash || !Number.isInteger(iterations) || iterations < 1) return false
+  const candidate = derivePasswordHash(password, salt, iterations)
   const expected = Buffer.from(hash, 'hex')
   const actual = Buffer.from(candidate, 'hex')
   return expected.length === actual.length && crypto.timingSafeEqual(actual, expected)
+}
+
+function passwordHashNeedsUpgrade(stored) {
+  const value = String(stored || '')
+  if (!value.startsWith('pbkdf2-sha256$')) return true
+  const iterations = Number(value.split('$')[1])
+  return !Number.isInteger(iterations) || iterations < passwordPbkdf2Iterations
+}
+
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex')
 }
 
 function publicUser(user) {
@@ -580,21 +637,28 @@ async function auth(req, res, next) {
   }
 
   const db = await readDb()
-  const session = db.sessions.find((item) => item.token === token)
+  const tokenHash = hashSessionToken(token)
+  const session = db.sessions.find((item) => item.tokenHash === tokenHash || item.token === token)
   const user = session ? db.users.find((item) => item.id === session.userId) : null
   if (!session || !user) {
     res.status(401).json({ error: '登录已失效' })
     return
   }
   if (isSessionExpired(session)) {
-    db.sessions = db.sessions.filter((item) => item.token !== token)
+    db.sessions = db.sessions.filter((item) => item !== session)
     await writeDb(db)
     res.status(401).json({ error: '登录已过期，请重新登录' })
     return
   }
 
+  if (!session.tokenHash || session.token) {
+    session.tokenHash = tokenHash
+    delete session.token
+    await writeDb(db)
+  }
+
   req.user = user
-  req.token = token
+  req.sessionTokenHash = tokenHash
   req.db = db
   next()
 }
@@ -1134,7 +1198,7 @@ function splitPdfPageIntoSections(page) {
   return sections
 }
 
-async function parsePdf(buffer, filename) {
+async function parsePdf(buffer, filename, options = {}) {
   const parser = new PDFParse({ data: buffer })
   try {
     const result = await parser.getText()
@@ -1143,6 +1207,16 @@ async function parsePdf(buffer, filename) {
     let sourcePages = usable
     let ocr = null
     if (!sourcePages.length) {
+      if (options.deferOcr) {
+        return {
+          title: filename.replace(/\.[^.]+$/, ''),
+          author: '',
+          type: 'pdf',
+          chapters: [],
+          needsOcr: true,
+          pageCount: inferPdfPageCount(result),
+        }
+      }
       const ocrResult = await withOcrSlot(() => ocrPdfFallback(buffer, inferPdfPageCount(result)))
       sourcePages = ocrResult.pages
       ocr = {
@@ -1170,14 +1244,13 @@ async function parsePdf(buffer, filename) {
 
 async function withOcrSlot(task) {
   const maxConcurrent = Math.max(1, Number(process.env.MAX_ACTIVE_OCR_TASKS || 1))
-  if (activeOcrTasks >= maxConcurrent) {
-    throw new Error('OCR 队列正忙，请稍后再上传扫描版 PDF')
-  }
+  if (activeOcrTasks >= maxConcurrent) await new Promise((resolve) => ocrSlotWaiters.push(resolve))
   activeOcrTasks += 1
   try {
     return await task()
   } finally {
     activeOcrTasks -= 1
+    ocrSlotWaiters.shift()?.()
   }
 }
 
@@ -1193,7 +1266,7 @@ function inferPdfPageCount(result) {
   return Math.max(1, Math.round(count || 1))
 }
 
-async function ocrPdfFallback(buffer, pageCount) {
+async function ocrPdfFallback(buffer, pageCount, onProgress = async () => undefined) {
   if (!pdfOcrEnabled) {
     throw new Error('这个 PDF 可能是扫描版或文字过少，当前服务器未开启 OCR')
   }
@@ -1202,7 +1275,7 @@ async function ocrPdfFallback(buffer, pageCount) {
 
   if (shouldUseVisionOcr()) {
     try {
-      const pages = await ocrPdfPagesWithVision(buffer, maxPages)
+      const pages = await ocrPdfPagesWithVision(buffer, maxPages, onProgress)
       const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= pdfOcrVisionMinWords)
       if (hasEnoughOcrText(cleaned)) {
         console.info(`PDF OCR completed with ${pdfOcrVisionModel}: ${cleaned.length}/${maxPages} pages`)
@@ -1218,7 +1291,7 @@ async function ocrPdfFallback(buffer, pageCount) {
     }
   }
 
-  const pages = await ocrPdfPagesWithTesseract(buffer, maxPages)
+  const pages = await ocrPdfPagesWithTesseract(buffer, maxPages, onProgress)
   const cleaned = cleanPdfPages(pages).filter((page) => page.wordCount >= 40)
   if (!hasEnoughOcrText(cleaned)) {
     const detail = errors.length ? `；${errors.join('；')}` : ''
@@ -1237,7 +1310,7 @@ function shouldUseVisionOcr() {
   return Boolean(pdfOcrVisionBaseUrl && pdfOcrVisionApiKey && pdfOcrVisionModel)
 }
 
-async function ocrPdfPagesWithVision(buffer, maxPages) {
+async function ocrPdfPagesWithVision(buffer, maxPages, onProgress = async () => undefined) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-ocr-vision-'))
   const pdfPath = path.join(tmpDir, 'source.pdf')
   const pages = []
@@ -1251,6 +1324,7 @@ async function ocrPdfPagesWithVision(buffer, maxPages) {
       } finally {
         await fs.rm(imagePath, { force: true }).catch(() => undefined)
       }
+      await onProgress({ provider: pdfOcrVisionModel, page, total: maxPages })
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
@@ -1258,7 +1332,7 @@ async function ocrPdfPagesWithVision(buffer, maxPages) {
   return pages
 }
 
-async function ocrPdfPagesWithTesseract(buffer, maxPages) {
+async function ocrPdfPagesWithTesseract(buffer, maxPages, onProgress = async () => undefined) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-ocr-'))
   const pdfPath = path.join(tmpDir, 'source.pdf')
   const pages = []
@@ -1273,6 +1347,7 @@ async function ocrPdfPagesWithTesseract(buffer, maxPages) {
       } finally {
         await fs.rm(imagePath, { force: true }).catch(() => undefined)
       }
+      await onProgress({ provider: 'tesseract-ocr', page, total: maxPages })
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
@@ -1300,7 +1375,7 @@ async function renderPdfPage(pdfPath, tmpDir, page, dpi) {
 
 async function runVisionOcr(imagePath) {
   const imageBytes = await fs.readFile(imagePath)
-  const response = await fetch(`${pdfOcrVisionBaseUrl}/chat/completions`, {
+  const response = await fetchOcrService(`${pdfOcrVisionBaseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${pdfOcrVisionApiKey}`,
@@ -1872,7 +1947,7 @@ Source:
 ${source}
 `
 
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -2096,7 +2171,7 @@ Word: ${term}
 Sentence: ${sentence || ''}
 `
 
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -2180,7 +2255,7 @@ async function generateSpeechAudio(unit, request = buildSpeechAudioRequest(unit)
 }
 
 async function generateOpenAISpeech({ baseUrl, apiKey, model, voice, input, instructions, outputFormat }) {
-  const response = await fetch(`${baseUrl}/audio/speech`, {
+  const response = await fetchTtsService(`${baseUrl}/audio/speech`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -2204,7 +2279,7 @@ async function generateOpenAISpeech({ baseUrl, apiKey, model, voice, input, inst
 }
 
 async function generateMimoSpeech({ baseUrl, apiKey, model, voice, input, instructions, outputFormat }) {
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetchTtsService(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'api-key': apiKey,
@@ -2556,7 +2631,7 @@ async function requestGeminiTtsChunk(provider, text, voiceName) {
   }
   if (!provider.official) headers.Authorization = `Bearer ${provider.apiKey}`
 
-  const response = await fetch(geminiTtsApiUrl(provider.baseUrl, provider.model), {
+  const response = await fetchTtsService(geminiTtsApiUrl(provider.baseUrl, provider.model), {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -2885,7 +2960,7 @@ async function testTextAiService() {
   if (!apiKey) throw new Error('未配置文本生成 API key')
   const model = process.env.OPENAI_MODEL || 'gpt-5.5'
   const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -3120,7 +3195,7 @@ async function generatePodcastScriptPart(sourceText, lexile, episodeNumber = 1, 
 
   const model = process.env.OPENAI_MODEL || 'gpt-5.5'
   const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -4108,7 +4183,7 @@ async function auditContentFidelity(content, unit) {
       .join('\n\n')
     const model = process.env.OPENAI_MODEL || 'gpt-5.5'
     const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
-    const response = await fetch(`${baseUrl}/responses`, {
+    const response = await fetchTextService(`${baseUrl}/responses`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -4676,7 +4751,7 @@ async function generateMicroPracticeWithOpenAI(type, difficulty, context) {
         ? '- Use the weak vocabulary naturally and accurately. Keep the topic adult and concrete.'
         : '- Use reliable general knowledge, but keep the language simple and avoid controversial unsupported claims.'
 
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -4928,6 +5003,78 @@ function saveMicroVocabularyFromAttempt(db, userId, practice, wrongQuestions, sa
   return savedCount
 }
 
+function saveUnitVocabularyFromCompletion(db, userId, book, unit, wrongQuestions, viewedWords = []) {
+  const contentVocabulary = unit.content?.vocabulary || []
+  const normalizeTerm = (term) => normalizeText(term).replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, '').slice(0, 80)
+  const isValidTerm = (term) => /^[A-Za-z][A-Za-z' -]*$/.test(term)
+  const wrongCountByTerm = new Map()
+
+  for (const question of wrongQuestions) {
+    const explicit = (question.relatedTerms || []).map(normalizeTerm).filter(isValidTerm)
+    const questionText = `${question.prompt || ''} ${question.explanationZh || ''}`.toLowerCase()
+    const inferred = explicit.length
+      ? []
+      : contentVocabulary
+          .map((item) => normalizeTerm(item.term))
+          .filter((term) => term && questionText.includes(term.toLowerCase()))
+          .slice(0, 2)
+    for (const term of new Set([...explicit, ...inferred])) {
+      const key = term.toLowerCase()
+      wrongCountByTerm.set(key, (wrongCountByTerm.get(key) || 0) + 1)
+    }
+  }
+
+  const termsByKey = new Map()
+  for (const rawTerm of [...viewedWords, ...wrongCountByTerm.keys()]) {
+    const normalized = normalizeTerm(rawTerm)
+    if (!isValidTerm(normalized)) continue
+    const key = normalized.toLowerCase()
+    const canonical = contentVocabulary.find((item) => normalizeTerm(item.term).toLowerCase() === key)?.term || normalized
+    if (!termsByKey.has(key)) termsByKey.set(key, canonical)
+  }
+
+  const now = new Date().toISOString()
+  let newVocabularyCount = 0
+  const savedTerms = [...termsByKey.values()].slice(0, 30)
+  for (const term of savedTerms) {
+    const key = normalizeTerm(term).toLowerCase()
+    const detail = contentVocabulary.find((item) => normalizeTerm(item.term).toLowerCase() === key)
+    const existing = db.vocabulary.find((item) => item.userId === userId && normalizeTerm(item.term).toLowerCase() === key)
+    const wrongQuestionCount = wrongCountByTerm.get(key) || 0
+    if (existing) {
+      existing.seenCount = Number(existing.seenCount || 0) + 1
+      existing.lastSeenAt = now
+      existing.dueAt = existing.dueAt || now
+      existing.mastery = Number(existing.mastery || 0)
+      existing.wrongQuestionCount = Number(existing.wrongQuestionCount || 0) + wrongQuestionCount
+      existing.exampleSentence = existing.exampleSentence || exampleSentenceForTerm(unit.content, term)
+      continue
+    }
+
+    db.vocabulary.push({
+      id: nanoid(),
+      userId,
+      term,
+      meaningZh: detail?.meaningZh || fallbackChineseMeaning(term),
+      simpleEnglish: detail?.simpleEnglish || 'A word saved from your reading.',
+      exampleSentence: exampleSentenceForTerm(unit.content, term),
+      wrongQuestionCount,
+      sourceBookTitle: book.title,
+      seenCount: 1,
+      mastery: 0,
+      createdAt: now,
+      lastSeenAt: now,
+      dueAt: now,
+    })
+    newVocabularyCount += 1
+  }
+
+  return {
+    newVocabularyCount,
+    savedVocabularyCount: savedTerms.length,
+  }
+}
+
 function exampleSentenceFromText(text, term) {
   const lower = String(term || '').toLowerCase()
   return splitSentences(text).find((sentence) => sentence.toLowerCase().includes(lower)) || ''
@@ -5044,7 +5191,7 @@ ${sourceContextForReadingParagraph(unit, sourceMapItem, index, paragraphCount)}
 
   const model = process.env.OPENAI_MODEL || 'gpt-5.5'
   const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
-  const response = await fetch(`${baseUrl}/responses`, {
+  const response = await fetchTextService(`${baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -5179,6 +5326,7 @@ function stageLabel(stage, job) {
   if (normalized === 'podcast-audio') return '播客音频合成'
   if (normalized === 'podcast-setup') return '播客任务准备'
   if (normalized === 'quality-review') return '生成质量检查'
+  if (normalized === 'pdf-ocr') return '扫描 PDF 解析'
   if (normalized === 'cancel') return '用户操作'
   if (normalized === 'setup') return '任务准备'
   if (job?.type === 'generate-podcast') return '播客生成'
@@ -5218,7 +5366,7 @@ function diagnoseJobError(job, errorOrMessage, options = {}) {
     errorCode = 'provider-auth'
     errorHint = '外部服务密钥或模型配置不可用。需要先检查服务器环境变量，再重试任务。'
     retryable = false
-  } else if ([408, 500, 502, 503, 504].includes(statusCode) || /timeout|timed out|econnreset|enotfound|fetch failed|network|暂时|上游/.test(text)) {
+  } else if ([408, 500, 502, 503, 504].includes(statusCode) || /timeout|timed out|econnreset|enotfound|fetch failed|network|超时|暂时|上游/.test(text)) {
     errorCode = 'upstream-temporary'
     errorHint = '上游服务或网络临时不稳定。稍后点击重试通常可以恢复。'
     retryable = true
@@ -5307,11 +5455,12 @@ function scheduleAutoRetryJob(job) {
   return true
 }
 
-function promoteDueAutoRetryJobs(db) {
+function promoteDueAutoRetryJobs(db, allowedTypes = null) {
   const now = Date.now()
   let changed = false
   let nextDelayMs = 0
   for (const job of db.jobs || []) {
+    if (allowedTypes && !allowedTypes.includes(job.type)) continue
     if (job.status !== 'failed' || !job.autoRetryAt) continue
     const retryAt = Date.parse(job.autoRetryAt)
     if (!Number.isFinite(retryAt)) continue
@@ -5353,6 +5502,12 @@ function promoteDueAutoRetryJobs(db) {
       podcast.status = 'planned'
       podcast.error = ''
       podcast.updatedAt = job.updatedAt
+    }
+    const book = job.type === 'parse-pdf-ocr' ? db.books.find((item) => item.id === job.bookId && item.userId === job.userId) : null
+    if (book) {
+      book.status = 'processing'
+      book.error = ''
+      book.updatedAt = job.updatedAt
     }
     changed = true
   }
@@ -5875,6 +6030,8 @@ function publicJob(job, db = null) {
     unitId: job.unitId,
     podcastId: job.podcastId,
     bookId: job.bookId,
+    processedPages: Number(job.processedPages || 0),
+    totalPages: Number(job.totalPages || 0),
     progress: job.progress || 0,
     message: job.message || '',
     error: job.error || '',
@@ -5906,7 +6063,11 @@ function publicJobWithContext(job, db) {
   if (!output) return null
   const unit = db.units.find((item) => item.id === job.unitId)
   const podcast = db.podcasts.find((item) => item.id === job.podcastId)
-  const book = unit ? db.books.find((item) => item.id === unit.bookId) : podcast ? db.books.find((item) => item.id === podcast.bookId) : null
+  const book = unit
+    ? db.books.find((item) => item.id === unit.bookId)
+    : podcast
+      ? db.books.find((item) => item.id === podcast.bookId)
+      : db.books.find((item) => item.id === job.bookId)
   return {
     ...output,
     unitTitle: unit?.title || '',
@@ -6002,6 +6163,209 @@ function enqueuePodcastJob(db, userId, podcast) {
   return job
 }
 
+function enqueuePdfOcrJob(db, userId, book, pageCount, fileBytes) {
+  const active = db.jobs.find(
+    (job) => job.userId === userId && job.bookId === book.id && job.type === 'parse-pdf-ocr' && ['queued', 'running', 'paused'].includes(job.status)
+  )
+  if (active) return active
+  const now = new Date().toISOString()
+  const job = {
+    id: nanoid(),
+    userId,
+    type: 'parse-pdf-ocr',
+    status: 'queued',
+    progress: 2,
+    message: '扫描 PDF 已加入 OCR 队列',
+    bookId: book.id,
+    totalPages: Math.min(Math.max(1, Number(pageCount || 1)), pdfOcrMaxPages),
+    processedPages: 0,
+    fileBytes: Number(fileBytes || 0),
+    createdAt: now,
+    updatedAt: now,
+  }
+  db.jobs.push(job)
+  book.status = 'processing'
+  book.processingJobId = job.id
+  book.error = ''
+  book.updatedAt = now
+  return job
+}
+
+async function updatePdfOcrJobProgress(jobId, info) {
+  const db = await readDb()
+  const job = db.jobs.find((item) => item.id === jobId && item.type === 'parse-pdf-ocr')
+  if (!job) throw new Error('OCR 任务已不存在')
+  if (job.cancelRequested) {
+    const error = new Error('任务已取消')
+    error.code = 'OCR_TASK_CANCELED'
+    throw error
+  }
+  const book = db.books.find((item) => item.id === job.bookId && item.userId === job.userId)
+  const page = Math.max(0, Number(info.page || 0))
+  const total = Math.max(1, Number(info.total || job.totalPages || 1))
+  job.processedPages = page
+  job.totalPages = total
+  job.progress = Math.max(Number(job.progress || 0), Math.min(90, 10 + Math.round((page / total) * 80)))
+  job.provider = info.provider || job.provider || ''
+  job.message = `${job.provider || 'OCR'} 正在识别第 ${page}/${total} 页`
+  job.updatedAt = new Date().toISOString()
+  if (book) {
+    book.status = 'processing'
+    book.updatedAt = job.updatedAt
+  }
+  await writeDb(db)
+}
+
+async function processPdfOcrJob(jobId) {
+  let db = await readDb()
+  let job = db.jobs.find((item) => item.id === jobId && item.type === 'parse-pdf-ocr')
+  let book = job ? db.books.find((item) => item.id === job.bookId && item.userId === job.userId) : null
+  if (!job) return
+  if (!book?.sourcePath) {
+    markJobFailed(job, 'OCR 原始 PDF 不存在', { stage: 'pdf-ocr' })
+    if (book) {
+      book.status = 'failed'
+      book.error = job.error
+    }
+    await writeDb(db)
+    return
+  }
+
+  job.status = 'running'
+  job.progress = Math.max(5, Number(job.progress || 0))
+  job.message = '正在准备扫描 PDF OCR'
+  job.startedAt = job.startedAt || new Date().toISOString()
+  job.updatedAt = new Date().toISOString()
+  book.status = 'processing'
+  book.error = ''
+  book.updatedAt = job.updatedAt
+  await writeDb(db)
+
+  try {
+    const buffer = await fs.readFile(book.sourcePath)
+    const ocrResult = await withOcrSlot(() =>
+      ocrPdfFallback(buffer, job.totalPages || 1, (info) => updatePdfOcrJobProgress(jobId, info))
+    )
+    const chapters = groupPdfPages(ocrResult.pages)
+    if (!chapters.length) throw new Error('OCR 已完成，但可用于生成学习单元的英文正文太少')
+
+    db = await readDb()
+    job = db.jobs.find((item) => item.id === jobId && item.type === 'parse-pdf-ocr')
+    book = job ? db.books.find((item) => item.id === job.bookId && item.userId === job.userId) : null
+    if (!job || !book) return
+    if (job.cancelRequested) {
+      markJobCanceled(job)
+      book.status = 'failed'
+      book.error = job.message
+      book.updatedAt = job.updatedAt
+      await writeDb(db)
+      return
+    }
+
+    const units = planUnits(book.id, chapters, 'pdf')
+    db.units = db.units.filter((unit) => unit.bookId !== book.id)
+    db.units.push(...units)
+    book.chapterCount = chapters.length
+    book.wordCount = chapters.reduce((total, chapter) => total + Number(chapter.wordCount || wordCount(chapter.text)), 0)
+    book.status = 'ready'
+    book.ocr = {
+      provider: ocrResult.provider,
+      pages: ocrResult.pages.length,
+      pagesAttempted: ocrResult.pagesAttempted,
+    }
+    book.error = ''
+    book.updatedAt = new Date().toISOString()
+    job.status = 'succeeded'
+    job.progress = 100
+    job.processedPages = ocrResult.pagesAttempted
+    job.provider = ocrResult.provider
+    job.message = `OCR 完成，已生成 ${units.length} 个学习单元`
+    job.finishedAt = book.updatedAt
+    job.updatedAt = book.updatedAt
+    clearJobDiagnosis(job)
+    recordAiUsage(db, {
+      userId: job.userId,
+      jobId: job.id,
+      category: 'ocr',
+      action: 'pdf-ocr',
+      provider: ocrResult.provider,
+      model: ocrResult.provider,
+      pages: ocrResult.pagesAttempted || ocrResult.pages.length,
+      bytes: job.fileBytes || 0,
+      success: true,
+    })
+
+    const keepSource = Boolean(userSettings(db, job.userId).keepSourceFiles)
+    const temporarySourcePath = book.sourceTemporary && !keepSource ? book.sourcePath : ''
+    if (temporarySourcePath) {
+      book.sourcePath = ''
+      book.sourceTemporary = false
+    }
+    await writeDb(db)
+    if (temporarySourcePath) await fs.rm(temporarySourcePath, { force: true }).catch(() => undefined)
+  } catch (error) {
+    db = await readDb()
+    job = db.jobs.find((item) => item.id === jobId && item.type === 'parse-pdf-ocr')
+    book = job ? db.books.find((item) => item.id === job.bookId && item.userId === job.userId) : null
+    if (!job) return
+    if (error?.code === 'OCR_TASK_CANCELED' || job.cancelRequested) {
+      markJobCanceled(job)
+    } else {
+      markJobFailed(job, error?.message || 'PDF OCR 失败', { stage: 'pdf-ocr', message: '扫描 PDF 解析失败' })
+      scheduleAutoRetryJob(job)
+      recordAiUsage(db, {
+        userId: job.userId,
+        jobId: job.id,
+        category: 'ocr',
+        action: 'pdf-ocr',
+        provider: job.provider || 'OCR',
+        model: job.provider || '',
+        pages: job.processedPages || 0,
+        bytes: job.fileBytes || 0,
+        success: false,
+        statusCode: job.statusCode,
+        errorCode: job.errorCode,
+        message: job.error,
+      })
+      appendErrorLog(db, {
+        scope: 'job',
+        message: job.error,
+        detail: job.errorHint || '',
+        userId: job.userId,
+        jobId: job.id,
+        bookId: job.bookId,
+        statusCode: job.statusCode,
+        errorCode: job.errorCode,
+      })
+    }
+    if (book) {
+      book.status = 'failed'
+      book.error = job.error || job.message
+      book.updatedAt = job.updatedAt
+    }
+    await writeDb(db)
+    if (job.autoRetryAt) setTimeout(processOcrJobQueue, Math.max(250, secondsUntil(job.autoRetryAt) * 1000 + 250))
+  }
+}
+
+async function processOcrJobQueue() {
+  if (ocrJobQueueActive) return
+  ocrJobQueueActive = true
+  try {
+    while (true) {
+      const db = await readDb()
+      const autoRetry = promoteDueAutoRetryJobs(db, ['parse-pdf-ocr'])
+      if (autoRetry.changed) await writeDb(db)
+      if (autoRetry.nextDelayMs) setTimeout(processOcrJobQueue, Math.min(autoRetry.nextDelayMs + 250, 2_147_483_647))
+      const job = db.jobs.find((item) => item.type === 'parse-pdf-ocr' && item.status === 'queued')
+      if (!job) break
+      await processPdfOcrJob(job.id)
+    }
+  } finally {
+    ocrJobQueueActive = false
+  }
+}
+
 async function recoverInterruptedJobs() {
   const db = await readDb()
   let changed = false
@@ -6022,10 +6386,17 @@ async function recoverInterruptedJobs() {
       podcast.status = podcast.scriptText ? 'synthesizing' : 'planned'
       podcast.updatedAt = job.updatedAt
     }
+    const book = job.type === 'parse-pdf-ocr' ? db.books.find((item) => item.id === job.bookId) : null
+    if (book) {
+      book.status = 'processing'
+      book.error = ''
+      book.updatedAt = job.updatedAt
+    }
     changed = true
   }
   if (changed) await writeDb(db)
   setTimeout(processJobQueue, 0)
+  setTimeout(processOcrJobQueue, 0)
 }
 
 async function updatePodcastJobProgress(podcastId, jobId, progress, message) {
@@ -6212,7 +6583,7 @@ async function processJobQueue() {
   try {
     while (true) {
       let db = await readDb()
-      const autoRetry = promoteDueAutoRetryJobs(db)
+      const autoRetry = promoteDueAutoRetryJobs(db, ['generate-unit', 'generate-podcast'])
       if (autoRetry.changed) await writeDb(db)
       if (autoRetry.nextDelayMs) setTimeout(processJobQueue, Math.min(autoRetry.nextDelayMs + 250, 2_147_483_647))
       let job = db.jobs.find((item) => ['generate-unit', 'generate-podcast'].includes(item.type) && item.status === 'queued')
@@ -6526,16 +6897,19 @@ async function createApp() {
       }
       db.users.push(user)
       userSettings(db, user.id)
-    } else if (!verifyPassword(password, user.passwordHash)) {
-      recordLoginFailure(limit.key)
-      res.status(401).json({ error: loginFailureMessage })
-      return
+    } else {
+      if (!verifyPassword(password, user.passwordHash)) {
+        recordLoginFailure(limit.key)
+        res.status(401).json({ error: loginFailureMessage })
+        return
+      }
+      if (passwordHashNeedsUpgrade(user.passwordHash)) user.passwordHash = hashPassword(password)
     }
 
     const token = nanoid(48)
     const createdAt = new Date().toISOString()
     const expiresAt = new Date(Date.now() + sessionDays * 24 * 60 * 60 * 1000).toISOString()
-    db.sessions.push({ token, userId: user.id, createdAt, expiresAt })
+    db.sessions.push({ tokenHash: hashSessionToken(token), userId: user.id, createdAt, expiresAt })
     await writeDb(db)
     clearLoginFailures(limit.key)
     res.json({ token, user: publicUser(user), settings: userSettings(db, user.id) })
@@ -6620,6 +6994,7 @@ async function createApp() {
         loginWindowMinutes: Math.round(loginWindowMs / 60000),
         loginMaxFailures,
         passwordMinLength,
+        passwordPbkdf2Iterations,
       },
       deployment: {
         nodeEnv: process.env.NODE_ENV || 'development',
@@ -6719,7 +7094,7 @@ async function createApp() {
     }
     user.passwordHash = hashPassword(nextPassword)
     user.passwordChangedAt = new Date().toISOString()
-    db.sessions = db.sessions.filter((session) => session.token === req.token || session.userId !== user.id)
+    db.sessions = db.sessions.filter((session) => session.tokenHash === req.sessionTokenHash || session.userId !== user.id)
     await writeDb(db)
     res.json({ ok: true })
   })
@@ -6954,12 +7329,12 @@ async function createApp() {
         return
       }
 
-      const parsed = ext === '.epub' ? await parseEpub(req.file.buffer, original) : await parsePdf(req.file.buffer, original)
+      const parsed = ext === '.epub' ? await parseEpub(req.file.buffer, original) : await parsePdf(req.file.buffer, original, { deferOcr: true })
       const db = req.db
       const settings = userSettings(db, req.user.id)
       const bookId = nanoid()
       let sourcePath = ''
-      if (settings.keepSourceFiles) {
+      if (settings.keepSourceFiles || parsed.needsOcr) {
         const userDir = path.join(uploadDir, req.user.id)
         await fs.mkdir(userDir, { recursive: true })
         sourcePath = path.join(userDir, `${bookId}${ext}`)
@@ -6974,14 +7349,26 @@ async function createApp() {
         type: parsed.type,
         filename: original,
         sourcePath,
+        sourceTemporary: Boolean(parsed.needsOcr && !settings.keepSourceFiles),
         chapterCount: parsed.chapters.length,
         wordCount: parsed.chapters.reduce((total, chapter) => total + chapter.wordCount, 0),
-        status: 'ready',
+        status: parsed.needsOcr ? 'processing' : 'ready',
         createdAt: new Date().toISOString(),
       }
       const units = planUnits(bookId, parsed.chapters, parsed.type)
       db.books.push(book)
       db.units.push(...units)
+      if (parsed.needsOcr) {
+        const job = enqueuePdfOcrJob(db, req.user.id, book, parsed.pageCount, req.file.size)
+        await writeDb(db)
+        setTimeout(processOcrJobQueue, 0)
+        res.status(202).json({
+          book: { ...summarizeBook(book, units), glossary: buildBookGlossary(book, units) },
+          units: [],
+          job: publicJobWithContext(job, db),
+        })
+        return
+      }
       if (parsed.ocr) {
         recordAiUsage(db, {
           userId: req.user.id,
@@ -7500,7 +7887,13 @@ async function createApp() {
     }
     const unit = db.units.find((item) => item.id === job.unitId)
     const podcast = db.podcasts.find((item) => item.id === job.podcastId && item.userId === req.user.id)
-    res.json({ job: publicJobWithContext(job, db), unit: publicUnit(unit, db, req.user.id), podcast: publicPodcast(podcast) })
+    const book = db.books.find((item) => item.id === job.bookId && item.userId === req.user.id)
+    res.json({
+      job: publicJobWithContext(job, db),
+      unit: publicUnit(unit, db, req.user.id),
+      podcast: publicPodcast(podcast),
+      book: book ? summarizeBook(book, db.units.filter((item) => item.bookId === book.id)) : null,
+    })
   })
 
   app.get('/api/jobs', auth, async (req, res) => {
@@ -7531,6 +7924,7 @@ async function createApp() {
     }
     const unit = db.units.find((item) => item.id === job.unitId)
     const podcast = db.podcasts.find((item) => item.id === job.podcastId && item.userId === req.user.id)
+    const book = db.books.find((item) => item.id === job.bookId && item.userId === req.user.id)
     const action = String(req.body.action || '')
     const now = new Date().toISOString()
 
@@ -7542,7 +7936,7 @@ async function createApp() {
       job.status = 'queued'
       job.message = '已恢复排队'
       job.updatedAt = now
-      setTimeout(processJobQueue, 0)
+      setTimeout(job.type === 'parse-pdf-ocr' ? processOcrJobQueue : processJobQueue, 0)
     } else if (action === 'cancel' && ['queued', 'paused'].includes(job.status)) {
       markJobCanceled(job)
       if (podcast) {
@@ -7550,13 +7944,18 @@ async function createApp() {
         podcast.error = job.message
         podcast.updatedAt = job.updatedAt
       }
+      if (book && job.type === 'parse-pdf-ocr') {
+        book.status = 'failed'
+        book.error = job.message
+        book.updatedAt = job.updatedAt
+      }
     } else if (action === 'cancel' && job.status === 'running') {
       job.cancelRequested = true
       job.message = '任务将在当前生成结束后取消'
       job.updatedAt = now
     } else if (['retry', 'retry-fallback'].includes(action) && ['failed', 'canceled'].includes(job.status)) {
       if (job.type === 'generate-podcast' && shouldRateLimitPodcast() && !consumeUserQuota(req, res, 'generate-podcast')) return
-      if (job.type !== 'generate-podcast' && shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
+      if (job.type === 'generate-unit' && shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
       if (action === 'retry-fallback' && job.type !== 'generate-podcast') {
         res.status(400).json({ error: '只有播客任务支持备用 TTS 来源重试' })
         return
@@ -7586,7 +7985,12 @@ async function createApp() {
         podcast.preferTtsFallback = action === 'retry-fallback'
         podcast.updatedAt = now
       }
-      setTimeout(processJobQueue, 0)
+      if (book && job.type === 'parse-pdf-ocr') {
+        book.status = 'processing'
+        book.error = ''
+        book.updatedAt = now
+      }
+      setTimeout(job.type === 'parse-pdf-ocr' ? processOcrJobQueue : processJobQueue, 0)
     } else if (action === 'retry' && job.status === 'succeeded' && unit) {
       if (shouldRateLimitAiText() && !consumeUserQuota(req, res, 'generate-unit')) return
       const settings = userSettings(db, req.user.id)
@@ -7610,7 +8014,12 @@ async function createApp() {
       }
     }
     await writeDb(db)
-    res.json({ job: publicJobWithContext(job, db), unit: publicUnit(unit, db, req.user.id), podcast: publicPodcast(podcast) })
+    res.json({
+      job: publicJobWithContext(job, db),
+      unit: publicUnit(unit, db, req.user.id),
+      podcast: publicPodcast(podcast),
+      book: book ? summarizeBook(book, db.units.filter((item) => item.bookId === book.id)) : null,
+    })
   })
 
   app.post('/api/words/define', auth, async (req, res, next) => {
@@ -7696,106 +8105,114 @@ async function createApp() {
     res.json({ progress: publicProgress(getUnitProgress(db, req.user.id, unit.id)) })
   })
 
-  app.patch('/api/units/:unitId/progress', auth, async (req, res) => {
-    const db = req.db
-    const unit = db.units.find((item) => item.id === req.params.unitId)
-    const book = unit ? db.books.find((item) => item.id === unit.bookId && item.userId === req.user.id) : null
-    if (!unit || !book) {
-      res.status(404).json({ error: '未找到学习单元' })
-      return
+  app.patch('/api/units/:unitId/progress', auth, async (req, res, next) => {
+    try {
+      await withKeyedLock(unitProgressLocks, `${req.user.id}:${req.params.unitId}`, async () => {
+        const db = await readDb()
+        const unit = db.units.find((item) => item.id === req.params.unitId)
+        const book = unit ? db.books.find((item) => item.id === unit.bookId && item.userId === req.user.id) : null
+        if (!unit || !book) {
+          res.status(404).json({ error: '未找到学习单元' })
+          return
+        }
+        const progress = ensureUnitProgress(db, req.user.id, unit.id)
+        if (Object.prototype.hasOwnProperty.call(req.body, 'paragraphIndex')) {
+          const maxParagraph = Math.max(0, (unit.content?.reading?.paragraphs?.length || 1) - 1)
+          progress.paragraphIndex = Math.max(0, Math.min(maxParagraph, Number(req.body.paragraphIndex || 0)))
+        }
+        if (Object.prototype.hasOwnProperty.call(req.body, 'listeningCompleted')) progress.listeningCompleted = Boolean(req.body.listeningCompleted)
+        if (Object.prototype.hasOwnProperty.call(req.body, 'answers') && typeof req.body.answers === 'object') progress.answers = req.body.answers || {}
+        if (Object.prototype.hasOwnProperty.call(req.body, 'completed')) progress.completed = Boolean(req.body.completed)
+        progress.updatedAt = new Date().toISOString()
+        await writeDb(db)
+        res.json({ progress: publicProgress(progress) })
+      })
+    } catch (error) {
+      next(error)
     }
-    const progress = ensureUnitProgress(db, req.user.id, unit.id)
-    if (Object.prototype.hasOwnProperty.call(req.body, 'paragraphIndex')) {
-      const maxParagraph = Math.max(0, (unit.content?.reading?.paragraphs?.length || 1) - 1)
-      progress.paragraphIndex = Math.max(0, Math.min(maxParagraph, Number(req.body.paragraphIndex || 0)))
-    }
-    if (Object.prototype.hasOwnProperty.call(req.body, 'listeningCompleted')) progress.listeningCompleted = Boolean(req.body.listeningCompleted)
-    if (Object.prototype.hasOwnProperty.call(req.body, 'answers') && typeof req.body.answers === 'object') progress.answers = req.body.answers || {}
-    if (Object.prototype.hasOwnProperty.call(req.body, 'completed')) progress.completed = Boolean(req.body.completed)
-    progress.updatedAt = new Date().toISOString()
-    await writeDb(db)
-    res.json({ progress: publicProgress(progress) })
   })
 
-  app.post('/api/units/:unitId/complete', auth, async (req, res) => {
-    const db = req.db
-    const unit = db.units.find((item) => item.id === req.params.unitId)
-    const book = unit ? db.books.find((item) => item.id === unit.bookId && item.userId === req.user.id) : null
-    if (!unit || !book || !unit.content) {
-      res.status(404).json({ error: '未找到可完成的学习单元' })
-      return
-    }
+  app.post('/api/units/:unitId/complete', auth, async (req, res, next) => {
+    try {
+      await withKeyedLock(unitCompletionLocks, `${req.user.id}:${req.params.unitId}`, async () => {
+        const db = await readDb()
+        const unit = db.units.find((item) => item.id === req.params.unitId)
+        const book = unit ? db.books.find((item) => item.id === unit.bookId && item.userId === req.user.id) : null
+        if (!unit || !book || !unit.content) {
+          res.status(404).json({ error: '未找到可完成的学习单元' })
+          return
+        }
 
-    const answers = req.body.answers || {}
-    const questions = unit.content.questions || []
-    const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
-    const wrongQuestions = questions
-      .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
-      .map((question) => ({ id: question.id, prompt: question.prompt, explanationZh: question.explanationZh }))
-    const correctRate = questions.length ? correctCount / questions.length : 0
-    const viewedWords = Array.isArray(req.body.viewedWords) ? req.body.viewedWords : []
-    const vocabTerms = new Set([...viewedWords, ...(unit.content.vocabulary || []).slice(0, 5).map((item) => item.term)])
+        const existingReport = db.reports.find((item) => item.userId === req.user.id && item.unitId === unit.id)
+        if (existingReport) {
+          const progress = ensureUnitProgress(db, req.user.id, unit.id)
+          let changed = false
+          if (!progress.completed) {
+            progress.completed = true
+            progress.updatedAt = new Date().toISOString()
+            changed = true
+          }
+          if (unit.status !== 'completed') {
+            unit.status = 'completed'
+            unit.completedAt = unit.completedAt || existingReport.createdAt
+            changed = true
+          }
+          if (changed) await writeDb(db)
+          res.json({ report: existingReport, duplicate: true })
+          return
+        }
 
-    for (const term of vocabTerms) {
-      if (!term) continue
-      const existing = db.vocabulary.find((item) => item.userId === req.user.id && item.term.toLowerCase() === String(term).toLowerCase())
-      if (existing) {
-        existing.seenCount += 1
-        existing.lastSeenAt = new Date().toISOString()
-        existing.dueAt = existing.dueAt || new Date().toISOString()
-        existing.mastery = Number(existing.mastery || 0)
-        existing.exampleSentence = existing.exampleSentence || exampleSentenceForTerm(unit.content, term)
-      } else {
-        const detail = (unit.content.vocabulary || []).find((item) => item.term.toLowerCase() === String(term).toLowerCase())
-        db.vocabulary.push({
+        const answers = req.body.answers || {}
+        const questions = unit.content.questions || []
+        const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
+        const wrongQuestions = questions
+          .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
+          .map((question) => ({
+            id: question.id,
+            prompt: question.prompt,
+            explanationZh: question.explanationZh,
+            relatedTerms: question.relatedTerms || [],
+          }))
+        const correctRate = questions.length ? correctCount / questions.length : 0
+        const viewedWords = Array.isArray(req.body.viewedWords) ? req.body.viewedWords : []
+        const vocabularyResult = saveUnitVocabularyFromCompletion(db, req.user.id, book, unit, wrongQuestions, viewedWords)
+
+        const currentSettings = userSettings(db, req.user.id)
+        const report = {
           id: nanoid(),
           userId: req.user.id,
-          term,
-          meaningZh: detail?.meaningZh || fallbackChineseMeaning(term),
-          simpleEnglish: detail?.simpleEnglish || 'A word saved from your reading.',
-          exampleSentence: exampleSentenceForTerm(unit.content, term),
-          wrongQuestionCount: wrongQuestions.length,
-          sourceBookTitle: book.title,
-          seenCount: 1,
-          mastery: 0,
+          bookId: book.id,
+          unitId: unit.id,
+          bookTitle: book.title,
+          unitTitle: unit.title,
+          correctCount,
+          questionCount: questions.length,
+          correctRate,
+          newVocabularyCount: vocabularyResult.newVocabularyCount,
+          savedVocabularyCount: vocabularyResult.savedVocabularyCount,
+          wrongQuestions,
+          readingLevel: currentSettings.readingLevel,
+          listeningLevel: currentSettings.listeningLevel,
+          studyMinutes: Math.max(1, Math.round(Number(currentSettings.studyMinutes || 10))),
+          suggestion: adaptiveSuggestion({ correctRate, newVocabularyCount: vocabularyResult.newVocabularyCount }, currentSettings),
           createdAt: new Date().toISOString(),
-          lastSeenAt: new Date().toISOString(),
-          dueAt: new Date().toISOString(),
-        })
-      }
+        }
+        unit.status = 'completed'
+        unit.completedAt = new Date().toISOString()
+        const progress = ensureUnitProgress(db, req.user.id, unit.id)
+        progress.answers = answers
+        progress.completed = true
+        progress.listeningCompleted = Boolean(req.body.listeningCompleted || progress.listeningCompleted)
+        progress.paragraphIndex = Math.max(progress.paragraphIndex || 0, (unit.content.reading?.paragraphs?.length || 1) - 1)
+        progress.updatedAt = new Date().toISOString()
+        db.reports.push(report)
+        report.levelAdjustment = applyAdaptiveLeveling(db, req.user.id)
+        await writeDb(db)
+        res.json({ report, duplicate: false })
+      })
+    } catch (error) {
+      next(error)
     }
-
-    const currentSettings = userSettings(db, req.user.id)
-    const report = {
-      id: nanoid(),
-      userId: req.user.id,
-      bookId: book.id,
-      unitId: unit.id,
-      bookTitle: book.title,
-      unitTitle: unit.title,
-      correctCount,
-      questionCount: questions.length,
-      correctRate,
-      newVocabularyCount: vocabTerms.size,
-      wrongQuestions,
-      readingLevel: currentSettings.readingLevel,
-      listeningLevel: currentSettings.listeningLevel,
-      studyMinutes: Math.max(1, Math.round(Number(currentSettings.studyMinutes || 10))),
-      suggestion: adaptiveSuggestion({ correctRate, newVocabularyCount: vocabTerms.size }, currentSettings),
-      createdAt: new Date().toISOString(),
-    }
-    unit.status = 'completed'
-    unit.completedAt = new Date().toISOString()
-    const progress = ensureUnitProgress(db, req.user.id, unit.id)
-    progress.answers = answers
-    progress.completed = true
-    progress.listeningCompleted = Boolean(req.body.listeningCompleted || progress.listeningCompleted)
-    progress.paragraphIndex = Math.max(progress.paragraphIndex || 0, (unit.content.reading?.paragraphs?.length || 1) - 1)
-    progress.updatedAt = new Date().toISOString()
-    db.reports.push(report)
-    report.levelAdjustment = applyAdaptiveLeveling(db, req.user.id)
-    await writeDb(db)
-    res.json({ report })
   })
 
   app.get('/api/vocabulary/export', auth, async (req, res) => {
@@ -7922,7 +8339,7 @@ async function createApp() {
 
   app.post('/api/logout', auth, async (req, res) => {
     const db = req.db
-    db.sessions = db.sessions.filter((item) => item.token !== req.token)
+    db.sessions = db.sessions.filter((item) => item.tokenHash !== req.sessionTokenHash)
     await writeDb(db)
     res.json({ ok: true })
   })

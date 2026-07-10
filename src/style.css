@@ -251,6 +251,35 @@ p {
   flex: 0 0 auto;
 }
 
+.study-head-tools {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-direction: column;
+}
+
+.progress-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.progress-sync.error {
+  color: var(--danger);
+  cursor: pointer;
+}
+
+.progress-sync:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
 .study-mode-switch .segmented {
   background: var(--surface);
   border: 1px solid var(--line-soft);
@@ -459,6 +488,11 @@ p {
 .notice.danger {
   color: var(--danger);
   background: var(--danger-2);
+}
+
+.notice.success {
+  color: var(--green);
+  background: var(--green-2);
 }
 
 .login-screen,
@@ -810,6 +844,28 @@ p {
   display: grid;
   gap: 14px;
   box-shadow: var(--shadow);
+}
+
+.book-card-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.book-processing-note,
+.book-error-note {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.book-processing-note {
+  color: var(--blue);
+}
+
+.book-error-note {
+  color: var(--danger);
 }
 
 .book-card h2,
@@ -2813,6 +2869,15 @@ p {
   .study-mode-switch,
   .study-mode-switch .segmented {
     width: 100%;
+  }
+
+  .study-head-tools {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .progress-sync {
+    align-self: flex-end;
   }
 
   .focus-quality-notice {

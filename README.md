@@ -50,6 +50,8 @@ INITIAL_ADMIN_PASSWORD=
 SESSION_DAYS=30
 LOGIN_WINDOW_MINUTES=10
 LOGIN_MAX_FAILURES=8
+PASSWORD_MIN_LENGTH=8
+PASSWORD_PBKDF2_ITERATIONS=600000
 MAX_UPLOAD_MB=50
 MAX_EPUB_UPLOAD_MB=50
 MAX_PDF_UPLOAD_MB=50
@@ -64,6 +66,9 @@ PDF_OCR_LANGUAGE=eng
 PDF_OCR_DPI=220
 PDF_OCR_MAX_PAGES=120
 PDF_OCR_COMMAND_TIMEOUT_MS=120000
+OCR_HTTP_REQUEST_TIMEOUT_MS=120000
+AI_TEXT_REQUEST_TIMEOUT_MS=120000
+TTS_REQUEST_TIMEOUT_MS=180000
 PDF_SECTION_TARGET_WORDS=3400
 MAX_EPUB_EXPANDED_MB=200
 MAX_EPUB_ENTRIES=2000
@@ -140,7 +145,7 @@ PODCAST_TTS_CHUNK_CHARS=8000
 - 文字版 PDF，建议 50MB 以内
 - 清晰的英文扫描版 PDF，会在原生文字抽取失败时自动 OCR
 
-OCR 会优先使用视觉模型 `hunyuan-ocr`，失败或识别正文太少时自动回退到本地 `tesseract-ocr`。如果未单独配置 `PDF_OCR_VISION_BASE_URL` / `PDF_OCR_VISION_API_KEY`，会复用 `GEMINI_TTS_BASE_URL` / `GEMINI_TTS_API_KEY`。本地兜底 OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
+OCR 会优先使用视觉模型 `hunyuan-ocr`，失败或识别正文太少时自动回退到本地 `tesseract-ocr`。扫描 PDF 上传后会立即进入后台 OCR 任务，书库和任务中心会显示状态、页数进度、失败原因与重试入口，不需要让浏览器一直停留在上传页面。如果未单独配置 `PDF_OCR_VISION_BASE_URL` / `PDF_OCR_VISION_API_KEY`，会复用 `GEMINI_TTS_BASE_URL` / `GEMINI_TTS_API_KEY`。本地兜底 OCR 依赖服务器里的 `poppler-utils` 和 `tesseract-ocr`。Docker 部署镜像已内置这些依赖；非 Docker 部署需要手动安装。默认最多 OCR 前 120 页，可通过 `PDF_OCR_MAX_PAGES` 调整。OCR 适合清晰、方向正确、主要为英文正文的 PDF；倾斜、模糊、双栏复杂排版或大量图片注释的 PDF 识别质量会下降。
 
 解析器会尽量识别 EPUB 目录、NCX/nav 章节、正文标题和前后置内容；PDF 会优先抽取可复制文字，失败时使用 OCR，并自动清理重复页眉页脚、页码。PDF 的页码只作为来源定位，不作为学习单元划分依据；系统会优先按章节标题拆分，识别不到章节时按连续正文区块和词数拆分，区块目标大小可通过 `PDF_SECTION_TARGET_WORDS` 调整。学习单元源文本目标大小由 `SOURCE_WORDS_PER_UNIT` 控制，默认 1700 词；PDF 如果被页眉或短小节切得太碎，会继续合并相邻短区块，直到接近 `SOURCE_WORDS_MIN_PER_UNIT`。
 
@@ -158,7 +163,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 ## 学习进度
 
-系统会保存每个单元的上次阅读段落、听力完成状态和理解题草稿。首页会优先显示未完成单元，并显示每日目标、连续学习天数、最近 14 天学习日历和今日进度。
+系统会保存每个单元的上次阅读段落、听力完成状态和理解题草稿。阅读页会串行提交进度并显示“保存中 / 已同步 / 同步失败”，失败时可以直接重试。首页会优先显示未完成单元，并显示每日目标、连续学习天数、最近 14 天学习日历和今日进度。
 
 ## 每日轻练
 
@@ -170,7 +175,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 ## 生成任务
 
-单元生成已经改成后台任务。点击“生成”或“重生成”后，前端会显示排队、生成中、失败或完成状态；服务重启时，未完成的生成任务会重新排队。旧的同步生成接口仍保留，方便调试。
+单元生成和扫描 PDF OCR 都使用后台任务。点击“生成”或上传扫描 PDF 后，前端会显示排队、生成中、失败或完成状态；服务重启时，未完成任务会重新排队。旧的同步生成接口仍保留，方便调试。
 
 书籍页支持批量预生成。默认一次最多排队 5 个单元，可通过 `MAX_BATCH_GENERATE_UNITS` 调整。
 
@@ -195,6 +200,7 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 ```bash
 ALLOW_SIGNUP=false
 PASSWORD_MIN_LENGTH=8
+PASSWORD_PBKDF2_ITERATIONS=600000
 ```
 
 如需允许新账号注册，可以配置邀请码：
@@ -217,6 +223,8 @@ SESSION_DAYS=30
 LOGIN_WINDOW_MINUTES=10
 LOGIN_MAX_FAILURES=8
 ```
+
+服务器只保存会话 token 的 SHA-256 哈希；旧版本明文会话会在首次成功鉴权时自动迁移。旧的 10 万次 PBKDF2 密码哈希也会在下一次成功登录时自动升级。
 
 上传和 OCR 保护：
 
@@ -275,3 +283,5 @@ BACKUP_ENCRYPTION_REQUIRED=true
 npm run backup
 npm run restore -- ./backups/linguashelf-xxxx.zip.enc
 ```
+
+恢复会先解压到暂存目录并校验 SQLite/JSON 数据库，全部通过后才原子切换正式数据目录；恢复失败不会覆盖当前数据。

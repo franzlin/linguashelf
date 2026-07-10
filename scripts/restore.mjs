@@ -17,29 +17,89 @@ if (!backupFile) {
 const resolvedBackup = path.resolve(backupFile)
 const backupBytes = await readBackupBytes(resolvedBackup)
 const zip = await JSZip.loadAsync(backupBytes)
-const safetyDir = `${dataDir}-before-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`
+const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+const safetyDir = `${dataDir}-before-restore-${stamp}`
+const stagingDir = `${dataDir}-restore-staging-${stamp}`
+let currentMoved = false
+
+await fs.mkdir(path.dirname(dataDir), { recursive: true })
+await fs.rm(stagingDir, { recursive: true, force: true })
 
 try {
-  await fs.rename(dataDir, safetyDir)
-  console.log(`Current data moved to: ${safetyDir}`)
-} catch {
-  await fs.mkdir(path.dirname(dataDir), { recursive: true })
+  await extractData(zip, stagingDir)
+  await validateRestoredData(stagingDir)
+
+  try {
+    await fs.rename(dataDir, safetyDir)
+    currentMoved = true
+    console.log(`Current data moved to: ${safetyDir}`)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+
+  try {
+    await fs.rename(stagingDir, dataDir)
+  } catch (error) {
+    if (currentMoved) {
+      try {
+        await fs.rename(safetyDir, dataDir)
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `恢复切换失败，原数据仍保存在 ${safetyDir}`)
+      }
+    }
+    throw error
+  }
+
+  console.log(`Restored data from: ${resolvedBackup}`)
+} catch (error) {
+  await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
+  throw error
 }
 
-await fs.mkdir(dataDir, { recursive: true })
-
-for (const entry of Object.values(zip.files)) {
-  if (entry.dir || !entry.name.startsWith('data/')) continue
-  const relative = entry.name.slice('data/'.length)
-  if (!relative) continue
-  const target = path.resolve(dataDir, relative)
-  const targetRelative = path.relative(dataDir, target)
-  if (targetRelative.startsWith('..') || path.isAbsolute(targetRelative)) throw new Error(`Unsafe backup path: ${entry.name}`)
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  await fs.writeFile(target, await entry.async('nodebuffer'))
+async function extractData(sourceZip, targetDir) {
+  let restoredFiles = 0
+  await fs.mkdir(targetDir, { recursive: true })
+  for (const entry of Object.values(sourceZip.files)) {
+    if (entry.dir || !entry.name.startsWith('data/')) continue
+    const relative = entry.name.slice('data/'.length)
+    if (!relative) continue
+    const target = path.resolve(targetDir, relative)
+    const targetRelative = path.relative(targetDir, target)
+    if (targetRelative.startsWith('..') || path.isAbsolute(targetRelative)) throw new Error(`Unsafe backup path: ${entry.name}`)
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(target, await entry.async('nodebuffer'))
+    restoredFiles += 1
+  }
+  if (!restoredFiles) throw new Error('备份中没有可恢复的 data/ 文件')
 }
 
-console.log(`Restored data from: ${resolvedBackup}`)
+async function validateRestoredData(targetDir) {
+  const sqliteFile = path.join(targetDir, 'app.sqlite')
+  const jsonFile = path.join(targetDir, 'db.json')
+  try {
+    await fs.access(sqliteFile)
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(sqliteFile, { readOnly: true })
+    try {
+      const integrity = db.prepare('PRAGMA integrity_check').get()
+      if (String(integrity?.integrity_check || '').toLowerCase() !== 'ok') throw new Error('SQLite 完整性检查失败')
+      db.prepare('SELECT COUNT(*) AS count FROM records').get()
+    } finally {
+      db.close()
+    }
+    return
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+
+  try {
+    const parsed = JSON.parse(await fs.readFile(jsonFile, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('db.json 结构无效')
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error('备份缺少 app.sqlite 或 db.json')
+    throw error
+  }
+}
 
 async function readBackupBytes(file) {
   const bytes = await fs.readFile(file)
