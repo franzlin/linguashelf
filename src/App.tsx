@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
+import type { FormEvent, MouseEvent } from 'react'
 import {
   Activity,
   ArrowLeft,
@@ -16,7 +16,6 @@ import {
   FileText,
   Flame,
   Headphones,
-  Home,
   ListChecks,
   Loader2,
   MapPin,
@@ -29,13 +28,29 @@ import {
   Tags,
   TrendingUp,
   Trash2,
-  Upload,
   User,
   Volume2,
   X,
 } from 'lucide-react'
 import { AppShell } from './components/AppShell'
+import { OptionSegment, Segmented, SettingGroup, StatusItem } from './components/ui/Controls'
+import { MetricCard, SmallEmpty, Stat } from './components/ui/Metrics'
+import { ApiError, cookieSessionToken, requestJson, sessionFetch } from './lib/api'
+import {
+  aiUsageActionLabel,
+  formatBytes,
+  formatDateTime,
+  formatDecimal,
+  formatDuration,
+  formatNumber,
+  formatPercent,
+  formatTokenCount,
+  levelPercent,
+  shortDate,
+} from './lib/format'
 import type { View } from './navigation'
+import { HomePage } from './pages/HomePage'
+import { LibraryPage } from './pages/LibraryPage'
 
 type PodcastKind = 'preview' | 'review' | 'topic' | 'walkthrough'
 
@@ -68,7 +83,7 @@ type UserSettings = {
   lastLevelCheckReportId?: string
 }
 
-type Book = {
+export type Book = {
   id: string
   title: string
   author: string
@@ -223,7 +238,7 @@ type UnitContent = {
   fidelityNote: string
 }
 
-type Unit = {
+export type Unit = {
   id: string
   bookId: string
   title: string
@@ -364,7 +379,7 @@ type UnitProgress = {
   updatedAt?: string
 }
 
-type GenerationJob = {
+export type GenerationJob = {
   id: string
   type: string
   status: 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'canceled'
@@ -480,7 +495,7 @@ type Report = {
   createdAt: string
 }
 
-type AppData = {
+export type AppData = {
   user: UserProfile
   settings: UserSettings
   home: {
@@ -866,113 +881,6 @@ function isAndroidBrowser() {
 }
 
 const tokenKey = 'linguashelf-token'
-const cookieSessionToken = 'cookie-session'
-
-class ApiError extends Error {
-  status: number
-
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
-
-async function requestJson<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers)
-  if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  if (token && token !== cookieSessionToken) headers.set('Authorization', `Bearer ${token}`)
-
-  const response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
-  const text = await response.text()
-  let payload: Record<string, unknown> = {}
-  if (text) {
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      payload = { error: text.slice(0, 240) }
-    }
-  }
-  if (!response.ok) throw new ApiError(String(payload.error || '请求失败'), response.status)
-  return payload as T
-}
-
-function sessionFetch(path: string, token: string, options: RequestInit = {}) {
-  const headers = new Headers(options.headers)
-  if (token && token !== cookieSessionToken) headers.set('Authorization', `Bearer ${token}`)
-  return fetch(path, { ...options, headers, credentials: 'same-origin' })
-}
-
-function formatPercent(value: number) {
-  return `${Math.round(value * 100)}%`
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat('zh-CN').format(value || 0)
-}
-
-function formatDecimal(value: number) {
-  return Number(value || 0).toFixed(1)
-}
-
-function shortDate(value: string) {
-  if (!value) return ''
-  const [, month, day] = value.split('-')
-  return month && day ? `${Number(month)}/${Number(day)}` : value
-}
-
-function levelPercent(options: string[], value: string) {
-  const index = Math.max(0, options.indexOf(value))
-  if (options.length <= 1) return 0
-  return Math.round((index / (options.length - 1)) * 100)
-}
-
-function formatDuration(seconds: number) {
-  const safe = Math.max(0, Math.round(seconds || 0))
-  const minutes = Math.floor(safe / 60)
-  const rest = String(safe % 60).padStart(2, '0')
-  return `${minutes}:${rest}`
-}
-
-function formatBytes(bytes?: number) {
-  const value = Number(bytes || 0)
-  if (!value) return ''
-  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
-
-function formatTokenCount(tokens?: number) {
-  const value = Number(tokens || 0)
-  if (!value) return '0'
-  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
-  return String(Math.round(value))
-}
-
-function aiUsageActionLabel(action: string) {
-  const labels: Record<string, string> = {
-    'generate-unit': '分级单元',
-    'define-word': '单词释义',
-    'speech-audio': '听力音频',
-    'generate-podcast-script': '播客脚本',
-    'generate-podcast-tts': '播客 TTS',
-    'pdf-ocr': 'PDF OCR',
-  }
-  return labels[action] || action
-}
-
-function formatDateTime(value?: string | null) {
-  if (!value) return ''
-  try {
-    return new Intl.DateTimeFormat('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(value))
-  } catch {
-    return value
-  }
-}
 
 function aiServiceStatusLabel(status: AiService['status']) {
   const labels: Record<AiService['status'], string> = {
@@ -1456,7 +1364,7 @@ export function App() {
         )}
 
         {view === 'home' && (
-          <HomeView
+          <HomePage
             data={data}
             onOpenUnit={(unit) => {
               setSelectedBook(null)
@@ -1468,7 +1376,7 @@ export function App() {
         )}
 
         {view === 'library' && (
-          <LibraryView
+          <LibraryPage
             books={data.books}
             token={token}
             onUploaded={(book) => {
@@ -1649,178 +1557,6 @@ function LoginScreen({ onLogin }: { onLogin: (data: AppData) => void }) {
         </form>
       </section>
     </main>
-  )
-}
-
-function HomeView({
-  data,
-  onOpenUnit,
-  onOpenBook,
-  onNavigate,
-}: {
-  data: AppData
-  onOpenUnit: (unit: Unit) => void
-  onOpenBook: (book: Book) => void
-  onNavigate: (view: View) => void
-}) {
-  const continueUnit = data.home.continueUnit
-  const continueBook = data.home.continueBook
-  const recommendation = data.stats.recommendation
-  const reviewPlan = data.stats.reviewPlan
-  const failedJobs = data.home.failedJobs || []
-
-  return (
-    <section className="home-grid">
-      <div className="home-main">
-        <article className="continue-panel">
-          <div>
-            <span className="eyebrow">继续学习</span>
-            <h1>{continueUnit ? continueUnit.title : '还没有学习单元'}</h1>
-            <p>{continueBook ? `${continueBook.title} · ${continueUnit?.sourceLocation || ''}` : '上传一本书后，系统会在这里放下一篇最适合开始的材料。'}</p>
-          </div>
-          <div className="continue-actions">
-            {continueUnit ? (
-              <button className="primary-button" type="button" onClick={() => onOpenUnit(continueUnit)}>
-                {continueUnit.content ? <BookOpen size={18} /> : <Loader2 size={18} />}
-                {continueUnit.content ? '继续阅读' : '生成并学习'}
-              </button>
-            ) : (
-              <button className="primary-button" type="button" onClick={() => onNavigate('library')}>
-                <Upload size={18} />
-                上传书籍
-              </button>
-            )}
-            {continueBook && (
-              <button className="ghost-button" type="button" onClick={() => onOpenBook(continueBook)}>
-                打开书籍
-              </button>
-            )}
-          </div>
-        </article>
-
-        <div className="stat-row">
-          <Stat label="完成单元" value={String(data.stats.completedUnits)} />
-          <Stat label="每日轻练" value={String(data.stats.microPracticeCount || 0)} />
-          <Stat label="平均正确率" value={formatPercent(data.stats.averageCorrectRate)} />
-          <Stat label="到期生词" value={String(data.stats.dueVocabulary)} />
-          <Stat label="连续学习" value={`${data.stats.streakDays || 0} 天`} />
-        </div>
-
-        <div className="insight-grid">
-          <article className="insight-card">
-            <div>
-              <span className="eyebrow">今日推荐</span>
-              <h2>{recommendation?.title || '继续学习'}</h2>
-              <p>{recommendation?.body || '根据你的学习进度选择下一步。'}</p>
-            </div>
-            <button className="ghost-button" type="button" onClick={() => onNavigate(recommendation?.view || 'home')}>
-              {recommendation?.actionLabel || '开始'}
-            </button>
-          </article>
-          <article className="insight-card">
-            <div>
-              <span className="eyebrow">每日轻练</span>
-              <h2>
-                今日 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal ?? 1} 次
-              </h2>
-              <p>{data.stats.microTodayGoalMet ? '轻练目标已完成。' : '时间紧的时候，做一轮短练习保持手感。'}</p>
-            </div>
-            <button className="ghost-button" type="button" onClick={() => onNavigate('micro')}>
-              开始轻练
-            </button>
-          </article>
-          <article className="insight-card">
-            <div>
-              <span className="eyebrow">复习计划</span>
-              <h2>{reviewPlan?.message || '暂无复习压力'}</h2>
-              <p>今日 {reviewPlan?.dueToday || 0} · 明日 {reviewPlan?.dueTomorrow || 0} · 本周 {reviewPlan?.dueThisWeek || 0}</p>
-            </div>
-            <button className="ghost-button" type="button" onClick={() => onNavigate('vocabulary')}>
-              生词本
-            </button>
-          </article>
-        </div>
-
-        <section className="page-section compact-section">
-          <div className="section-head">
-            <div>
-              <h2>最近书籍</h2>
-              <p>{data.home.recentBooks.length ? '从最近处理的书继续' : '上传书籍后显示'}</p>
-            </div>
-            <button className="ghost-button" type="button" onClick={() => onNavigate('library')}>
-              书库
-            </button>
-          </div>
-          {data.home.recentBooks.length === 0 ? (
-            <div className="empty-state mini-empty">
-              <FileText size={28} />
-              <p>暂无书籍</p>
-            </div>
-          ) : (
-            <div className="mini-book-list">
-              {data.home.recentBooks.map((book) => {
-                const progress = book.totalUnits ? book.completedUnits / book.totalUnits : 0
-                return (
-                  <button key={book.id} type="button" onClick={() => onOpenBook(book)}>
-                    <span>{book.title}</span>
-                    <strong>{book.completedUnits}/{book.totalUnits}</strong>
-                    <div className="progress-line">
-                      <span style={{ width: `${Math.round(progress * 100)}%` }} />
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </section>
-      </div>
-
-      <aside className="home-side">
-        <section className="page-section compact-section">
-          <h2>生成任务</h2>
-          {data.home.activeJobs.length === 0 ? (
-            <p>当前没有后台任务。</p>
-          ) : (
-            <div className="job-list">
-              {data.home.activeJobs.map((job) => (
-                <div key={job.id} className="job-item">
-                  <span>{job.message || (job.status === 'queued' ? '排队中' : '生成中')}</span>
-                  <div className="progress-line">
-                    <span style={{ width: `${job.progress || 0}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {failedJobs.length > 0 && (
-            <div className="task-diagnosis muted">
-              <strong>最近有 {failedJobs.length} 个失败任务</strong>
-              <p>可以进入任务中心查看原因、重试或取消。</p>
-              <button className="ghost-button" type="button" onClick={() => onNavigate('tasks')}>
-                打开任务
-              </button>
-            </div>
-          )}
-        </section>
-
-        <section className="page-section compact-section">
-          <h2>学习节奏</h2>
-          <p>今日 {data.stats.todayCompleted || 0}/{data.stats.dailyGoalUnits || 1} 单元</p>
-          <p>轻练 {data.stats.todayMicroPractices || 0}/{data.stats.microDailyGoal ?? 1} 次</p>
-          <p>{data.settings.studyMinutes} 分钟 / 单元</p>
-          {data.home.latestReport && <p>上次正确率 {formatPercent(data.home.latestReport.correctRate)}</p>}
-          <div className="calendar-strip">
-            {(data.stats.calendar || []).map((item) => (
-              <span
-                key={item.date}
-                className={(item.units || item.microPractices) ? 'active' : ''}
-                title={`${item.date} · ${item.units} 单元 · ${item.microPractices || 0} 轻练`}
-              />
-            ))}
-          </div>
-        </section>
-      </aside>
-    </section>
   )
 }
 
@@ -2020,207 +1756,6 @@ function LoadingScreen({ error = '', onRetry }: { error?: string; onRetry?: () =
         </>
       )}
     </main>
-  )
-}
-
-function LibraryView({
-  books,
-  token,
-  onUploaded,
-  onOpenBook,
-  onDeleteBook,
-  onError,
-}: {
-  books: Book[]
-  token: string
-  onUploaded: (book: Book) => void
-  onOpenBook: (book: Book) => void
-  onDeleteBook: (book: Book) => Promise<boolean>
-  onError: (message: string) => void
-}) {
-  const inputRef = useRef<HTMLInputElement | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [dragActive, setDragActive] = useState(false)
-  const [deletingBookId, setDeletingBookId] = useState('')
-  const [uploadNotice, setUploadNotice] = useState('')
-
-  async function uploadFile(file: File) {
-    const lowerName = file.name.toLowerCase()
-    if (!lowerName.endsWith('.epub') && !lowerName.endsWith('.pdf')) {
-      onError('请选择 EPUB 或 PDF 文件')
-      return
-    }
-    if (uploading) return
-    setUploading(true)
-    try {
-      const form = new FormData()
-      form.append('file', file)
-      const result = await requestJson<{ book: Book; job?: GenerationJob }>('/api/books/upload', token, {
-        method: 'POST',
-        body: form,
-      })
-      setUploadNotice(
-        result.book.status === 'processing'
-          ? `《${result.book.title}》已上传，扫描 PDF 正在后台 OCR。可以离开本页，进度会保存在任务中心。`
-          : `《${result.book.title}》已导入。`
-      )
-      onUploaded(result.book)
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '上传失败')
-    } finally {
-      setUploading(false)
-      if (inputRef.current) inputRef.current.value = ''
-    }
-  }
-
-  function handleDrop(event: DragEvent<HTMLElement>) {
-    event.preventDefault()
-    setDragActive(false)
-    const files = Array.from(event.dataTransfer.files || [])
-    const file = files.find((item) => {
-      const name = item.name.toLowerCase()
-      return name.endsWith('.epub') || name.endsWith('.pdf')
-    })
-    if (!file) {
-      onError('请拖入 EPUB 或 PDF 文件')
-      return
-    }
-    uploadFile(file)
-  }
-
-  function handleDragOver(event: DragEvent<HTMLElement>) {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = uploading ? 'none' : 'copy'
-    if (!uploading) setDragActive(true)
-  }
-
-  function handleDragLeave(event: DragEvent<HTMLElement>) {
-    const nextTarget = event.relatedTarget as Node | null
-    if (nextTarget && event.currentTarget.contains(nextTarget)) return
-    setDragActive(false)
-  }
-
-  function handleUploadKey(event: KeyboardEvent<HTMLElement>) {
-    if (uploading) return
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    event.preventDefault()
-    inputRef.current?.click()
-  }
-
-  async function deleteFromLibrary(book: Book) {
-    setDeletingBookId(book.id)
-    try {
-      await onDeleteBook(book)
-    } finally {
-      setDeletingBookId('')
-    }
-  }
-
-  return (
-    <section className="page-section">
-      <div className="section-head">
-        <div>
-          <h1>我的书库</h1>
-          <p>{books.length ? `${books.length} 本书正在学习` : '上传一本书开始训练'}</p>
-        </div>
-        <div className="upload-actions">
-          <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={uploading}>
-            {uploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
-            上传 EPUB/PDF
-          </button>
-          <span>PDF 支持文字抽取，扫描版会自动 OCR</span>
-        </div>
-        <input
-          ref={inputRef}
-          className="visually-hidden"
-          type="file"
-          accept=".epub,.pdf,application/epub+zip,application/pdf"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) uploadFile(file)
-          }}
-        />
-      </div>
-
-      {uploadNotice && (
-        <div className="notice success">
-          <Check size={18} />
-          <span>{uploadNotice}</span>
-          <button className="icon-button" type="button" onClick={() => setUploadNotice('')} aria-label="关闭">
-            <X size={16} />
-          </button>
-        </div>
-      )}
-
-      <section
-        className={`upload-dropzone${dragActive ? ' active' : ''}${uploading ? ' busy' : ''}`}
-        role="button"
-        tabIndex={0}
-        aria-label="上传 EPUB 或 PDF"
-        onClick={() => {
-          if (!uploading) inputRef.current?.click()
-        }}
-        onKeyDown={handleUploadKey}
-        onDrop={handleDrop}
-        onDragEnter={handleDragOver}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-      >
-        <div className="upload-drop-icon">
-          {uploading ? <Loader2 className="spin" size={24} /> : <Upload size={24} />}
-        </div>
-        <div>
-          <h2>{uploading ? '正在上传解析' : '拖放 EPUB/PDF 到这里'}</h2>
-          <p>也可以点击此区域选择文件。</p>
-        </div>
-      </section>
-
-      {books.length === 0 ? (
-        <div className="empty-state">
-          <FileText size={32} />
-          <h2>还没有书</h2>
-          <p>支持 EPUB、文字版 PDF 和清晰的英文扫描版 PDF。</p>
-        </div>
-      ) : (
-        <div className="book-grid">
-          {books.map((book) => {
-            const progress = book.totalUnits ? book.completedUnits / book.totalUnits : 0
-            return (
-              <article key={book.id} className="book-card">
-                <div className="book-card-status">
-                  <div className="book-type">{book.type.toUpperCase()}</div>
-                  {book.status === 'processing' && <span className="status-pill running">OCR 处理中</span>}
-                  {book.status === 'failed' && <span className="status-pill failed">解析失败</span>}
-                </div>
-                <h2>{book.title}</h2>
-                <p>{book.author || book.filename}</p>
-                {book.status === 'processing' && <p className="book-processing-note">后台识别中，可在任务中心查看页数进度。</p>}
-                {book.status === 'failed' && book.error && <p className="book-error-note">{book.error}</p>}
-                <div className="book-meta">
-                  <span>{formatNumber(book.wordCount)} 词</span>
-                  <span>{book.totalUnits} 个单元</span>
-                </div>
-                <div className="progress-line" aria-label="学习进度">
-                  <span style={{ width: `${Math.round(progress * 100)}%` }} />
-                </div>
-                <div className="book-actions">
-                  <span>{book.completedUnits}/{book.totalUnits} 完成</span>
-                  <div className="book-action-buttons">
-                    <button type="button" onClick={() => onOpenBook(book)} disabled={book.status !== undefined && book.status !== 'ready'}>
-                      {book.status === 'processing' ? '解析中' : book.status === 'failed' ? '待重试' : '打开'}
-                    </button>
-                    <button className="danger-button" type="button" onClick={() => deleteFromLibrary(book)} disabled={deletingBookId === book.id}>
-                      {deletingBookId === book.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
-                      删除
-                    </button>
-                  </div>
-                </div>
-              </article>
-            )
-          })}
-        </div>
-      )}
-    </section>
   )
 }
 
@@ -3836,28 +3371,6 @@ function renderWords(
   })
 }
 
-function OptionSegment<T extends string>({
-  options,
-  value,
-  onChange,
-  ariaLabel,
-}: {
-  options: Array<{ value: T; label: string }>
-  value: T
-  onChange: (value: T) => void
-  ariaLabel?: string
-}) {
-  return (
-    <div className="segmented" role="group" aria-label={ariaLabel}>
-      {options.map((option) => (
-        <button key={option.value} type="button" className={value === option.value ? 'active' : ''} onClick={() => onChange(option.value)}>
-          {option.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 function MicroPracticeView({
   token,
   settings,
@@ -5449,66 +4962,5 @@ function SettingsView({
         </article>
       )}
     </section>
-  )
-}
-
-function StatusItem({ label, ok, value }: { label: string; ok: boolean; value: string }) {
-  return (
-    <div className={ok ? 'status-item ok' : 'status-item'}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  )
-}
-
-function SettingGroup({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <article className="setting-row">
-      <h2>{title}</h2>
-      <div>{children}</div>
-    </article>
-  )
-}
-
-function Segmented({ options, value, onChange, ariaLabel }: { options: string[]; value: string; onChange: (value: string) => void; ariaLabel?: string }) {
-  return (
-    <div className="segmented" role="group" aria-label={ariaLabel}>
-      {options.map((option) => (
-        <button key={option} type="button" className={value === option ? 'active' : ''} onClick={() => onChange(option)}>
-          {option}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="stat">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  )
-}
-
-function MetricCard({ icon: Icon, label, value, detail }: { icon: typeof Home; label: string; value: string; detail: string }) {
-  return (
-    <div className="metric-card">
-      <div className="metric-icon">
-        <Icon size={18} />
-      </div>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </div>
-  )
-}
-
-function SmallEmpty({ icon: Icon, text }: { icon: typeof Home; text: string }) {
-  return (
-    <div className="small-empty">
-      <Icon size={24} />
-      <p>{text}</p>
-    </div>
   )
 }
