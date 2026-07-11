@@ -193,10 +193,18 @@ async function checkHttpTarget(rawUrl) {
     record(health.ok, `${url}/api/health returns HTTP ${health.status}`)
     const ready = await fetch(`${url}/api/ready`)
     record(ready.ok, `${url}/api/ready returns HTTP ${ready.status}`)
-    const home = await fetch(`${url}/`)
+    const home = await fetch(`${url}/`, { headers: { 'cache-control': 'no-cache' } })
     const csp = home.headers.get('content-security-policy')
     record(home.ok, `${url}/ returns HTTP ${home.status}`)
     record(Boolean(csp), 'Content-Security-Policy header is present')
+    const localIndexPath = path.join(root, 'dist/index.html')
+    if (home.ok && await exists(localIndexPath)) {
+      const localIndex = await fs.readFile(localIndexPath)
+      const deployedIndex = Buffer.from(await home.arrayBuffer())
+      record(localIndex.equals(deployedIndex), 'deployed index.html matches local build output')
+    } else {
+      record('fail', 'deployed index.html could not be compared with local build output')
+    }
     const manifest = await fetch(`${url}/manifest.webmanifest`)
     record(manifest.ok, `${url}/manifest.webmanifest returns HTTP ${manifest.status}`)
     const sw = await fetch(`${url}/sw.js`)
