@@ -39,6 +39,7 @@ function isAndroidBrowser() {
 }
 
 const tokenKey = 'linguashelf-token'
+const maxConsecutivePollFailures = 4
 
 
 export function App() {
@@ -52,7 +53,8 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
-  const jobWatchAbortRef = useRef<AbortController | null>(null)
+  const unitGenerationAbortRef = useRef<AbortController | null>(null)
+  const batchGenerationWatchAbortRef = useRef<AbortController | null>(null)
   const bookRequestAbortRef = useRef<AbortController | null>(null)
   const isAdmin = data?.user.role === 'admin'
 
@@ -95,7 +97,8 @@ export function App() {
 
   useEffect(() => {
     return () => {
-      jobWatchAbortRef.current?.abort()
+      unitGenerationAbortRef.current?.abort()
+      batchGenerationWatchAbortRef.current?.abort()
       bookRequestAbortRef.current?.abort()
     }
   }, [])
@@ -255,34 +258,49 @@ export function App() {
   }
 
   async function runGenerationJob(unit: Unit, body: Record<string, unknown>) {
-    jobWatchAbortRef.current?.abort()
+    unitGenerationAbortRef.current?.abort()
     const controller = new AbortController()
-    jobWatchAbortRef.current = controller
-    const started = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/units/${unit.id}/generate-job`, token, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    updateUnitState(started.unit)
+    unitGenerationAbortRef.current = controller
+    try {
+      const started = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/units/${unit.id}/generate-job`, token, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      updateUnitState(started.unit)
 
-    let current = started
-    for (let attempt = 0; attempt < 240 && !controller.signal.aborted; attempt += 1) {
-      if (current.job.status === 'succeeded' && current.unit?.content) {
-        updateUnitState(current.unit)
-        return current.unit
+      let current = started
+      let consecutiveFailures = 0
+      for (let attempt = 0; attempt < 240 && !controller.signal.aborted; attempt += 1) {
+        if (current.job.status === 'succeeded' && current.unit?.content) {
+          updateUnitState(current.unit)
+          return current.unit
+        }
+        if (current.job.status === 'failed') {
+          throw new Error(current.job.error || '生成任务失败')
+        }
+        if (current.job.status === 'canceled') {
+          throw new Error('生成任务已取消')
+        }
+        await abortableDelay(1500, controller.signal)
+        if (controller.signal.aborted) throw new Error('生成轮询已取消')
+        try {
+          current = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${started.job.id}`, token, {
+            signal: controller.signal,
+          })
+          consecutiveFailures = 0
+          if (current.unit) updateUnitState(current.unit)
+        } catch (err) {
+          if (controller.signal.aborted) throw new Error('生成轮询已取消')
+          consecutiveFailures += 1
+          if (consecutiveFailures >= maxConsecutivePollFailures) throw err
+        }
       }
-      if (current.job.status === 'failed') {
-        throw new Error(current.job.error || '生成任务失败')
-      }
-      if (current.job.status === 'canceled') {
-        throw new Error('生成任务已取消')
-      }
-      await abortableDelay(1500, controller.signal)
-      if (controller.signal.aborted) throw new Error('生成轮询已取消')
-      current = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${started.job.id}`, token)
-      if (current.unit) updateUnitState(current.unit)
+
+      throw new Error('生成仍在进行，请稍后刷新查看')
+    } finally {
+      if (unitGenerationAbortRef.current === controller) unitGenerationAbortRef.current = null
     }
-
-    throw new Error('生成仍在进行，请稍后刷新查看')
   }
 
   function updateUnitState(unit: Unit) {
@@ -300,28 +318,40 @@ export function App() {
   }
 
   async function watchJobs(jobs: GenerationJob[]) {
-    jobWatchAbortRef.current?.abort()
+    batchGenerationWatchAbortRef.current?.abort()
     const controller = new AbortController()
-    jobWatchAbortRef.current = controller
+    batchGenerationWatchAbortRef.current = controller
     const pending = new Map(jobs.map((job) => [job.id, job]))
-    for (let attempt = 0; attempt < 240 && pending.size > 0 && !controller.signal.aborted; attempt += 1) {
-      await abortableDelay(1500, controller.signal)
-      if (controller.signal.aborted) break
-      for (const jobId of [...pending.keys()]) {
-        try {
-          const result = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${jobId}`, token)
-          if (result.unit) updateUnitState(result.unit)
-          if (['succeeded', 'failed', 'canceled'].includes(result.job.status)) pending.delete(jobId)
-        } catch {
-          pending.delete(jobId)
+    const consecutiveFailures = new Map<string, number>()
+    try {
+      for (let attempt = 0; attempt < 240 && pending.size > 0 && !controller.signal.aborted; attempt += 1) {
+        await abortableDelay(1500, controller.signal)
+        if (controller.signal.aborted) break
+        for (const jobId of [...pending.keys()]) {
+          try {
+            const result = await requestJson<{ job: GenerationJob; unit: Unit }>(`/api/jobs/${jobId}`, token, {
+              signal: controller.signal,
+            })
+            consecutiveFailures.delete(jobId)
+            if (result.unit) updateUnitState(result.unit)
+            if (['succeeded', 'failed', 'canceled'].includes(result.job.status)) pending.delete(jobId)
+          } catch {
+            if (controller.signal.aborted) break
+            const failures = (consecutiveFailures.get(jobId) || 0) + 1
+            consecutiveFailures.set(jobId, failures)
+            if (failures >= maxConsecutivePollFailures) pending.delete(jobId)
+          }
         }
       }
+      if (!controller.signal.aborted) await refresh()
+    } finally {
+      if (batchGenerationWatchAbortRef.current === controller) batchGenerationWatchAbortRef.current = null
     }
-    if (!controller.signal.aborted) refresh()
   }
 
   async function logout() {
-    jobWatchAbortRef.current?.abort()
+    unitGenerationAbortRef.current?.abort()
+    batchGenerationWatchAbortRef.current?.abort()
     bookRequestAbortRef.current?.abort()
     try {
       await requestJson('/api/logout', token, { method: 'POST', body: JSON.stringify({}) })

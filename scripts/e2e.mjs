@@ -700,6 +700,117 @@ try {
     throw new Error('A delayed book response overwrote the most recently opened book')
   }
   await page.unroute(`**/api/books/${firstRaceBook.id}`)
+
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.getByRole('heading', { name: '学习单元' }).waitFor()
+  const oldBookPodcast = {
+    id: 'e2e-old-book-podcast',
+    bookId: firstRaceBook.id,
+    kind: 'preview',
+    index: 1,
+    title: 'Old book podcast',
+    status: 'planned',
+    sourceUnitIds: [],
+    sourceWordCount: 100,
+    lexile: 900,
+    voice: 'Kore',
+    audio: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  const oldBookPodcastJob = {
+    id: 'e2e-old-book-podcast-job',
+    type: 'generate-podcast',
+    status: 'running',
+    podcastId: oldBookPodcast.id,
+    bookId: firstRaceBook.id,
+    progress: 20,
+    message: 'Generating old book podcast',
+    error: '',
+    createdAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  }
+  const retryPodcast = {
+    ...oldBookPodcast,
+    id: 'e2e-retry-podcast',
+    title: 'Retry podcast',
+  }
+  const retryPodcastJob = {
+    ...oldBookPodcastJob,
+    id: 'e2e-retry-podcast-job',
+    podcastId: retryPodcast.id,
+  }
+  let podcastGenerateCount = 0
+  let retryPodcastPollCount = 0
+  let oldBookPodcastPollCount = 0
+  await page.route(`**/api/books/${firstRaceBook.id}/podcasts/generate`, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    podcastGenerateCount += 1
+    const podcast = podcastGenerateCount === 1 ? retryPodcast : oldBookPodcast
+    const job = podcastGenerateCount === 1 ? retryPodcastJob : oldBookPodcastJob
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ podcasts: [podcast], jobs: [job], enqueued: 1 }),
+    })
+  })
+  await page.route(`**/api/jobs/${retryPodcastJob.id}`, async (route) => {
+    retryPodcastPollCount += 1
+    if (retryPodcastPollCount === 1) {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'temporary podcast poll failure' }) })
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: { ...retryPodcastJob, status: 'succeeded', progress: 100 },
+        podcast: { ...retryPodcast, status: 'ready' },
+      }),
+    })
+  })
+  await page.route(`**/api/jobs/${oldBookPodcastJob.id}`, async (route) => {
+    oldBookPodcastPollCount += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ job: oldBookPodcastJob, podcast: oldBookPodcast }),
+    })
+  })
+  const retryPodcastGenerateResponse = page.waitForResponse(
+    (response) => response.url().includes(`/api/books/${firstRaceBook.id}/podcasts/generate`) && response.request().method() === 'POST'
+  )
+  await page.getByRole('button', { name: '生成下一集' }).click()
+  await retryPodcastGenerateResponse
+  for (let attempt = 0; attempt < 25 && retryPodcastPollCount < 2; attempt += 1) await page.waitForTimeout(200)
+  if (retryPodcastPollCount < 2) throw new Error(`A transient podcast poll failure was not retried: ${retryPodcastPollCount} polls`)
+  await page.getByRole('button', { name: '生成下一集' }).waitFor({ state: 'visible' })
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.includes('生成下一集'))
+    return Boolean(button && !button.disabled)
+  })
+  const oldPodcastGenerateResponse = page.waitForResponse(
+    (response) => response.url().includes(`/api/books/${firstRaceBook.id}/podcasts/generate`) && response.request().method() === 'POST'
+  )
+  await page.getByRole('button', { name: '生成下一集' }).click()
+  await oldPodcastGenerateResponse
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.locator('.book-card').filter({ hasText: 'E2E Second Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.locator('.detail-head h1').filter({ hasText: 'E2E Second Reader' }).waitFor()
+  await page.waitForTimeout(1800)
+  if (oldBookPodcastPollCount !== 0) {
+    throw new Error(`An old-book podcast poll continued after switching books: ${oldBookPodcastPollCount}`)
+  }
+  if (await page.getByText(oldBookPodcast.title).count()) throw new Error('An old-book podcast appeared on the newly opened book')
+  await page.unroute(`**/api/books/${firstRaceBook.id}/podcasts/generate`)
+  await page.unroute(`**/api/jobs/${retryPodcastJob.id}`)
+  await page.unroute(`**/api/jobs/${oldBookPodcastJob.id}`)
+
   await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
   await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
   await page.getByRole('heading', { name: '学习单元' }).waitFor()
@@ -716,10 +827,103 @@ try {
   }
   await page.screenshot({ path: path.join(screenshotDir, 'book-detail-mobile.png'), fullPage: true })
   await page.setViewportSize({ width: 1280, height: 900 })
+
+  const pollingSetup = await (
+    await page.request.get(`${baseUrl}/api/books/${firstRaceBook.id}`, { headers: { Authorization: `Bearer ${token}` } })
+  ).json()
+  const batchWatchJob = {
+    id: 'e2e-batch-watch-job',
+    type: 'generate-unit',
+    status: 'running',
+    bookId: firstRaceBook.id,
+    progress: 20,
+    message: 'Watching batch generation',
+    error: '',
+    createdAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  }
+  let batchWatchPollCount = 0
+  let unitPollFailureInjected = false
+  await page.route(`**/api/books/${firstRaceBook.id}/pre-generate`, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ book: pollingSetup.book, units: pollingSetup.units, jobs: [batchWatchJob], enqueued: 1 }),
+    })
+  })
+  await page.route('**/api/jobs/*', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+    if (route.request().url().endsWith(`/api/jobs/${batchWatchJob.id}`)) {
+      batchWatchPollCount += 1
+      if (batchWatchPollCount === 1) {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'temporary batch poll failure' }) })
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          job: {
+            ...batchWatchJob,
+            status: batchWatchPollCount >= 3 ? 'succeeded' : 'running',
+            progress: batchWatchPollCount >= 3 ? 100 : 60,
+          },
+        }),
+      })
+      return
+    }
+    if (!unitPollFailureInjected) {
+      unitPollFailureInjected = true
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'temporary unit poll failure' }) })
+      return
+    }
+    await route.continue()
+  })
+  const preGenerateResponsePromise = page.waitForResponse(
+    (response) => response.url().includes(`/api/books/${firstRaceBook.id}/pre-generate`) && response.request().method() === 'POST'
+  )
+  await page.getByRole('button', { name: '批量预生成' }).click()
+  await preGenerateResponsePromise
   await page.locator('.unit-row').first().getByRole('button', { name: /^(学习|生成)$/ }).click()
   await page.getByRole('heading', { name: '分级阅读' }).waitFor({ timeout: 20000 })
   await page.getByRole('heading', { name: '听力预热' }).waitFor()
+  for (let attempt = 0; attempt < 30 && batchWatchPollCount < 3; attempt += 1) await page.waitForTimeout(200)
+  if (!unitPollFailureInjected) throw new Error('The unit-generation poll did not exercise the transient-failure retry path')
+  if (batchWatchPollCount < 3) {
+    throw new Error(`Starting a unit generation canceled the batch watcher or its retry: ${batchWatchPollCount} polls`)
+  }
+  await page.unroute(`**/api/books/${firstRaceBook.id}/pre-generate`)
+  await page.unroute('**/api/jobs/*')
   await page.screenshot({ path: path.join(screenshotDir, 'study-generated.png'), fullPage: true })
+
+  let unitAudioRequestCount = 0
+  await page.route('**/api/units/*/audio*', async (route) => {
+    unitAudioRequestCount += 1
+    await route.fulfill({ status: 200, contentType: 'audio/wav', body: makeSilentWav() })
+  })
+  const firstUnitAudioRequest = page.waitForRequest((request) => request.url().includes('/api/units/') && request.url().includes('/audio'))
+  await page.locator('.listening-block').getByRole('button', { name: '播放' }).click()
+  await firstUnitAudioRequest
+  await page.locator('.focus-quality-notice').getByRole('button', { name: '查看' }).click()
+  const faithfulRegenerateButton = page.getByRole('button', { name: '重新生成更忠实版本' })
+  await faithfulRegenerateButton.click()
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.includes('重新生成更忠实版本'))
+    return Boolean(button && !button.disabled)
+  }, null, { timeout: 20000 })
+  const secondUnitAudioRequest = page.waitForRequest((request) => request.url().includes('/api/units/') && request.url().includes('/audio'))
+  await page.locator('.listening-block').getByRole('button', { name: '播放' }).click()
+  await secondUnitAudioRequest
+  if (unitAudioRequestCount < 2) throw new Error(`Regenerating a unit reused stale listening audio: ${unitAudioRequestCount} requests`)
+  await page.unroute('**/api/units/*/audio*')
 
   let progressRequestsInFlight = 0
   let maxProgressRequestsInFlight = 0

@@ -22,11 +22,12 @@ import { Segmented } from '../components/ui/Controls'
 import { Stat } from '../components/ui/Metrics'
 import { listeningLevelOptions, readingLevelOptions } from '../config/learning'
 import { requestJson, sessionFetch } from '../lib/api'
-import { delay } from '../lib/async'
+import { abortableDelay } from '../lib/async'
 import { formatBytes, formatDuration, formatNumber } from '../lib/format'
 import type { Book, BookGlossaryItem, GenerationJob, Podcast, PodcastKind, Unit, UserSettings } from '../types/domain'
 
 const podcastKindOrder: PodcastKind[] = ['preview', 'review', 'topic', 'walkthrough']
+const maxConsecutivePodcastPollFailures = 4
 const podcastKindLabels: Record<PodcastKind, string> = {
   preview: '读前导入',
   review: '读后复盘',
@@ -170,10 +171,28 @@ export function BookPage({
   const audioUrlsRef = useRef<Record<string, string>>({})
   const podcastAudioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const podcastProgressSyncRef = useRef<Record<string, number>>({})
+  const podcastPollAbortRef = useRef<AbortController | null>(null)
+  const activeBookIdRef = useRef(book.id)
+  activeBookIdRef.current = book.id
 
   useEffect(() => {
-    loadPodcasts()
+    podcastPollAbortRef.current?.abort()
+    const controller = new AbortController()
+    podcastPollAbortRef.current = controller
+    setPodcasts([])
+    setPodcastBusy(false)
+    setLoadingAudioId('')
+    setDownloadingId('')
+    setDeletingPodcastId('')
+    setAudioUrls({})
+    setScriptTexts({})
+    setLoadingScriptId('')
+    loadPodcasts(book.id, controller.signal)
     return () => {
+      controller.abort()
+      if (podcastPollAbortRef.current === controller) podcastPollAbortRef.current = null
+      for (const audio of Object.values(podcastAudioRefs.current)) audio?.pause()
+      podcastAudioRefs.current = {}
       for (const url of Object.values(audioUrlsRef.current)) URL.revokeObjectURL(url)
       audioUrlsRef.current = {}
       if ('mediaSession' in navigator) {
@@ -232,16 +251,19 @@ export function BookPage({
     }
   }
 
-  async function loadPodcasts() {
+  async function loadPodcasts(bookId = book.id, signal?: AbortSignal) {
     try {
-      const result = await requestJson<{ podcasts: Podcast[] }>(`/api/books/${book.id}/podcasts`, token)
+      const result = await requestJson<{ podcasts: Podcast[] }>(`/api/books/${bookId}/podcasts`, token, { signal })
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
       setPodcasts(sortPodcastList(result.podcasts))
     } catch (err) {
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
       onError(err instanceof Error ? err.message : '无法加载播客')
     }
   }
 
-  function updatePodcastState(podcast: Podcast) {
+  function updatePodcastState(podcast: Podcast, bookId = book.id) {
+    if (activeBookIdRef.current !== bookId || podcast.bookId !== bookId) return
     setPodcasts((items) => {
       const exists = items.some((item) => item.id === podcast.id)
       const next = exists ? items.map((item) => (item.id === podcast.id ? podcast : item)) : [...items, podcast]
@@ -249,56 +271,73 @@ export function BookPage({
     })
   }
 
-  function replacePodcastKind(kind: PodcastKind, nextPodcasts: Podcast[]) {
+  function replacePodcastKind(kind: PodcastKind, nextPodcasts: Podcast[], bookId = book.id) {
+    if (activeBookIdRef.current !== bookId) return
     setPodcasts((items) => sortPodcastList([...items.filter((item) => normalizePodcastKind(item.kind) !== kind), ...nextPodcasts]))
   }
 
-  async function pollPodcastJobs(jobs: GenerationJob[]) {
+  async function pollPodcastJobs(jobs: GenerationJob[], bookId: string, signal: AbortSignal) {
     const pending = new Map(jobs.map((job) => [job.id, job]))
-    for (let attempt = 0; attempt < 720 && pending.size > 0; attempt += 1) {
-      await delay(1500)
+    const consecutiveFailures = new Map<string, number>()
+    for (let attempt = 0; attempt < 720 && pending.size > 0 && !signal.aborted; attempt += 1) {
+      await abortableDelay(1500, signal)
+      if (signal.aborted || activeBookIdRef.current !== bookId) return
       for (const jobId of [...pending.keys()]) {
         try {
-          const result = await requestJson<{ job: GenerationJob; podcast?: Podcast }>(`/api/jobs/${jobId}`, token)
-          if (result.podcast) updatePodcastState(result.podcast)
+          const result = await requestJson<{ job: GenerationJob; podcast?: Podcast }>(`/api/jobs/${jobId}`, token, { signal })
+          consecutiveFailures.delete(jobId)
+          if (result.podcast) updatePodcastState(result.podcast, bookId)
           if (['succeeded', 'failed', 'canceled'].includes(result.job.status)) pending.delete(jobId)
         } catch {
-          pending.delete(jobId)
+          if (signal.aborted || activeBookIdRef.current !== bookId) return
+          const failures = (consecutiveFailures.get(jobId) || 0) + 1
+          consecutiveFailures.set(jobId, failures)
+          if (failures >= maxConsecutivePodcastPollFailures) pending.delete(jobId)
         }
       }
     }
-    await loadPodcasts()
+    if (!signal.aborted && activeBookIdRef.current === bookId) await loadPodcasts(bookId, signal)
   }
 
   async function generatePodcasts(options: { force?: boolean; count?: number } = {}) {
+    const bookId = book.id
+    const signal = podcastPollAbortRef.current?.signal
     setPodcastBusy(true)
     try {
-      const result = await requestJson<{ podcasts: Podcast[]; jobs: GenerationJob[]; enqueued: number }>(`/api/books/${book.id}/podcasts/generate`, token, {
+      const result = await requestJson<{ podcasts: Podcast[]; jobs: GenerationJob[]; enqueued: number }>(`/api/books/${bookId}/podcasts/generate`, token, {
         method: 'POST',
         body: JSON.stringify({ force: Boolean(options.force), count: options.count || 0, kind: selectedPodcastKind }),
+        signal,
       })
-      replacePodcastKind(selectedPodcastKind, result.podcasts)
-      if (result.jobs.length) pollPodcastJobs(result.jobs)
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
+      replacePodcastKind(selectedPodcastKind, result.podcasts, bookId)
+      if (result.jobs.length && signal) pollPodcastJobs(result.jobs, bookId, signal)
     } catch (err) {
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
       onError(err instanceof Error ? err.message : '播客生成失败')
     } finally {
-      setPodcastBusy(false)
+      if (activeBookIdRef.current === bookId) setPodcastBusy(false)
     }
   }
 
   async function retryPodcast(podcast: Podcast) {
+    const bookId = book.id
+    const signal = podcastPollAbortRef.current?.signal
     setPodcastBusy(true)
     try {
       const result = await requestJson<{ podcast: Podcast; job: GenerationJob }>(`/api/podcasts/${podcast.id}/retry`, token, {
         method: 'POST',
         body: JSON.stringify({}),
+        signal,
       })
-      updatePodcastState(result.podcast)
-      pollPodcastJobs([result.job])
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
+      updatePodcastState(result.podcast, bookId)
+      if (signal) pollPodcastJobs([result.job], bookId, signal)
     } catch (err) {
+      if (signal?.aborted || activeBookIdRef.current !== bookId) return
       onError(err instanceof Error ? err.message : '播客重试失败')
     } finally {
-      setPodcastBusy(false)
+      if (activeBookIdRef.current === bookId) setPodcastBusy(false)
     }
   }
 

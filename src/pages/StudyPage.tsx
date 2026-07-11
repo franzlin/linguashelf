@@ -212,6 +212,11 @@ export function StudyPage({
   }, [])
 
   useEffect(() => {
+    releaseListeningAudio()
+    setSpeaking(false)
+  }, [unit.id, unit.generatedAt])
+
+  useEffect(() => {
     if (!content || currentParagraph <= 0) return
     window.setTimeout(() => {
       document.querySelector(`[data-paragraph-index="${currentParagraph}"]`)?.scrollIntoView({ block: 'center' })
@@ -220,14 +225,12 @@ export function StudyPage({
 
   useEffect(() => {
     return () => {
-      audioRef.current?.pause()
+      releaseListeningAudio()
       if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = 'none'
         for (const action of ['play', 'pause', 'stop', 'seekbackward', 'seekforward', 'seekto'] as MediaSessionAction[]) {
           navigator.mediaSession.setActionHandler(action, null)
         }
       }
-      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
       if ('speechSynthesis' in window) window.speechSynthesis.cancel()
     }
   }, [])
@@ -326,6 +329,19 @@ export function StudyPage({
     audio.setAttribute('playsinline', 'true')
     audioRef.current = audio
     return audio
+  }
+
+  function releaseListeningAudio() {
+    const audio = audioRef.current
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+    audioRef.current = null
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+    audioUrlRef.current = ''
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none'
   }
 
   function playBrowserSpeech(listeningText: string) {
