@@ -1139,8 +1139,17 @@ function isLikelyPageNumber(line) {
   return /^\d{1,4}$/.test(value) || /^[ivxlcdm]{1,8}$/i.test(value) || /^[-–—]\s*\d{1,4}\s*[-–—]$/.test(value)
 }
 
+function isPdfProductionArtifactLine(line) {
+  const value = normalizePdfLine(line)
+  if (!value) return false
+  if (/(?:^|\s)[A-Za-z]:[\\/][^\s]+/i.test(value)) return true
+  if (/\b(?:workingfolder|itools|typeset|proofs?|prepress)\b/i.test(value) && /[\\/]|\.3d\b/i.test(value)) return true
+  return false
+}
+
 function isPdfChapterHeading(line) {
   const value = normalizePdfLine(line)
+  if (isPdfProductionArtifactLine(value)) return false
   if (!value || value.length > 120 || wordCount(value) > 14) return false
   if (/^(chapter|part|book)\s+([ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(value)) return true
   if (/^\d{1,2}\s*[\.:–—-]\s+[A-Z][A-Za-z]/.test(value)) return true
@@ -1179,7 +1188,7 @@ function collectRepeatedPdfLines(pages) {
   for (const page of pages) {
     const seen = new Set()
     for (const line of page.lines) {
-      if (isLikelyPageNumber(line) || isPdfChapterHeading(line)) continue
+      if (isLikelyPageNumber(line) || isPdfProductionArtifactLine(line) || isPdfChapterHeading(line)) continue
       const fingerprint = pdfLineFingerprint(line)
       if (!fingerprint || fingerprint.length < 4 || fingerprint.length > 90) continue
       if (wordCount(fingerprint) > 12) continue
@@ -1206,7 +1215,7 @@ function cleanPdfPages(resultPages) {
 
   return pages.map((page) => {
     const lines = page.lines.filter((line) => {
-      if (isLikelyPageNumber(line)) return false
+      if (isLikelyPageNumber(line) || isPdfProductionArtifactLine(line)) return false
       const fingerprint = pdfLineFingerprint(line)
       if (repeated.has(fingerprint) && !isPdfChapterHeading(line)) return false
       return true

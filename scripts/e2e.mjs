@@ -138,10 +138,11 @@ function makeTextPdf(pageCount = 12) {
     const pageObjectNumber = 4 + pageIndex * 2
     const contentObjectNumber = pageObjectNumber + 1
     pageReferences.push(`${pageObjectNumber} 0 R`)
-    const lines = Array.from({ length: 14 }, (_, lineIndex) => {
+    const lines = [`C:/ITOOLS/WMS/CUP-NEW/WORKINGFOLDER/BOOK-${alphabeticToken(pageIndex)}.3D page ${pageIndex + 1}`]
+    lines.push(...Array.from({ length: 14 }, (_, lineIndex) => {
       const marker = `marker${alphabeticToken(pageIndex * 14 + lineIndex)}`
       return `The ${marker} passage explains how merchants soldiers ministers taxes credit reform parliament sovereignty prices wages debts labor institutions and local authority shaped political life.`
-    })
+    }))
     const commands = ['BT', '/F1 10 Tf', '48 750 Td']
     for (const line of lines) {
       commands.push(`(${escapePdfText(line)}) Tj`, '0 -48 Td')
@@ -812,6 +813,9 @@ try {
   }
   if (replanApplyPayload.units.length >= legacyUnitCount || replanApplyPayload.preview.proposed.average < 900) {
     throw new Error(`Unit replan did not merge legacy page fragments: ${JSON.stringify(replanApplyPayload.preview)}`)
+  }
+  if (replanApplyPayload.units.some((unit) => String(unit.sourceLocation).includes('C:/') || String(unit.sourceExcerpt).includes('C:/'))) {
+    throw new Error('PDF production-tool paths leaked into replanned source locations or excerpts')
   }
   await page.getByText(`已将 ${legacyUnitCount} 个旧单元重新规划为 ${replanApplyPayload.units.length} 个新单元。`).waitFor()
 
