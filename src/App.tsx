@@ -22,6 +22,7 @@ import { VocabularyPage } from './pages/VocabularyPage'
 import type {
   AppData,
   Book,
+  BookReplanResponse,
   GenerationJob,
   Report,
   Unit,
@@ -205,6 +206,38 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : '批量预生成失败')
       return 0
+    }
+  }
+
+  async function replanBook(book: Book, options: { preview?: boolean; expectedPreviousUnitCount?: number }) {
+    try {
+      const result = await requestJson<BookReplanResponse>(`/api/books/${book.id}/replan`, token, {
+        method: 'POST',
+        body: JSON.stringify(options),
+      })
+      if (result.book && result.units) {
+        const updatedBook = result.book
+        setSelectedBook(updatedBook)
+        setBookUnits(result.units)
+        setSelectedUnit(null)
+        setData((current) => {
+          if (!current) return current
+          return {
+            ...current,
+            books: current.books.map((item) => (item.id === book.id ? updatedBook : item)),
+            home: {
+              ...current.home,
+              continueBook: current.home.continueBook?.id === book.id ? updatedBook : current.home.continueBook,
+              recentBooks: current.home.recentBooks.map((item) => (item.id === book.id ? updatedBook : item)),
+            },
+          }
+        })
+      }
+      setError('')
+      return result
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重新规划学习单元失败')
+      return null
     }
   }
 
@@ -454,6 +487,7 @@ export function App() {
             onOpenUnit={openUnit}
             onRegenerateUnit={regenerateUnit}
             onPreGenerateBook={preGenerateBook}
+            onReplanBook={replanBook}
             onRenameBook={renameBook}
             onDeleteBook={deleteBook}
             onError={setError}

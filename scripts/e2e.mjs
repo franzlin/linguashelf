@@ -112,6 +112,62 @@ function makeBlankPdf() {
   return Buffer.from(output)
 }
 
+function makeTextPdf(pageCount = 12) {
+  function alphabeticToken(value) {
+    let number = value + 1
+    let token = ''
+    while (number > 0) {
+      number -= 1
+      token = String.fromCharCode(97 + (number % 26)) + token
+      number = Math.floor(number / 26)
+    }
+    return token
+  }
+
+  function escapePdfText(value) {
+    return value.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+  }
+
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]
+  const pageReferences = []
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const pageObjectNumber = 4 + pageIndex * 2
+    const contentObjectNumber = pageObjectNumber + 1
+    pageReferences.push(`${pageObjectNumber} 0 R`)
+    const lines = Array.from({ length: 14 }, (_, lineIndex) => {
+      const marker = `marker${alphabeticToken(pageIndex * 14 + lineIndex)}`
+      return `The ${marker} passage explains how merchants soldiers ministers taxes credit reform parliament sovereignty prices wages debts labor institutions and local authority shaped political life.`
+    })
+    const commands = ['BT', '/F1 10 Tf', '48 750 Td']
+    for (const line of lines) {
+      commands.push(`(${escapePdfText(line)}) Tj`, '0 -48 Td')
+    }
+    commands.push('ET')
+    const stream = `${commands.join('\n')}\n`
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`,
+      `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`
+    )
+  }
+  objects[1] = `<< /Type /Pages /Kids [${pageReferences.join(' ')}] /Count ${pageCount} >>`
+
+  let output = '%PDF-1.4\n'
+  const offsets = [0]
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(output))
+    output += `${index + 1} 0 obj\n${object}\nendobj\n`
+  })
+  const xrefOffset = Buffer.byteLength(output)
+  output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  for (let index = 1; index <= objects.length; index += 1) output += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
+  return Buffer.from(output)
+}
+
 async function verifyAtomicRestoreFailure() {
   const restoreRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linguashelf-restore-atomic-'))
   const targetDataDir = path.join(restoreRoot, 'data')
@@ -379,6 +435,78 @@ function upsert(db, collection, id, payload) {
   ).run(collection, id, JSON.stringify(payload), new Date().toISOString())
 }
 
+function replaceBookUnitsWithLegacyFragments(bookId, wordsPerUnit = 260) {
+  const db = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
+  try {
+    const unitRows = db.prepare("SELECT id, payload FROM records WHERE collection='units'").all()
+    const units = unitRows.map((row) => ({ rowId: row.id, value: JSON.parse(row.payload) })).filter((item) => item.value.bookId === bookId)
+    const sourceText = units.map((item) => item.value.sourceText || '').join('\n\n').trim()
+    const words = sourceText.split(/\s+/).filter(Boolean)
+    if (words.length < wordsPerUnit * 3) throw new Error(`Text PDF fixture produced too little source text: ${words.length}`)
+    const now = new Date().toISOString()
+    const fragments = []
+    for (let index = 0; index < words.length; index += wordsPerUnit) {
+      const fragment = words.slice(index, index + wordsPerUnit).join(' ')
+      if (fragment.split(/\s+/).length < 80) continue
+      fragments.push({
+        id: `e2e-legacy-unit-${fragments.length + 1}`,
+        bookId,
+        title: `Legacy Page ${fragments.length + 1}`,
+        status: 'planned',
+        sourceLocation: `Page ${fragments.length + 1}`,
+        sourceText: fragment,
+        sourceExcerpt: fragment.split(/\s+/).slice(0, 180).join(' '),
+        sourceWordCount: fragment.split(/\s+/).length,
+        createdAt: now,
+        generatedAt: null,
+        content: null,
+      })
+    }
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const item of units) db.prepare("DELETE FROM records WHERE collection='units' AND id=?").run(item.rowId)
+      for (const fragment of fragments) upsert(db, 'units', fragment.id, fragment)
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+    return fragments.length
+  } finally {
+    db.close()
+  }
+}
+
+function setTemporaryPodcastBlocker(bookId, enabled) {
+  const db = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
+  try {
+    const id = 'e2e-replan-podcast-blocker'
+    if (!enabled) {
+      db.prepare("DELETE FROM records WHERE collection='podcasts' AND id=?").run(id)
+      return
+    }
+    const book = JSON.parse(db.prepare("SELECT payload FROM records WHERE collection='books' AND id=?").get(bookId).payload)
+    const now = new Date().toISOString()
+    upsert(db, 'podcasts', id, {
+      id,
+      userId: book.userId,
+      bookId,
+      kind: 'preview',
+      index: 1,
+      title: 'Replan blocker',
+      status: 'ready',
+      sourceUnitIds: [],
+      sourceWordCount: 100,
+      lexile: 900,
+      audio: null,
+      createdAt: now,
+      updatedAt: now,
+    })
+  } finally {
+    db.close()
+  }
+}
+
 function insertFailedPodcastTask() {
   const db = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
   const user = JSON.parse(db.prepare("SELECT payload FROM records WHERE collection='users' LIMIT 1").get().payload)
@@ -636,6 +764,71 @@ try {
     uploadDb.close()
   }
   await page.screenshot({ path: path.join(screenshotDir, 'library-upload.png'), fullPage: true })
+
+  const replanPdfResponse = await page.request.post(`${baseUrl}/api/books/upload`, {
+    headers: { Authorization: `Bearer ${token}` },
+    multipart: {
+      file: {
+        name: 'e2e-replan.pdf',
+        mimeType: 'application/pdf',
+        buffer: makeTextPdf(),
+      },
+    },
+  })
+  const replanPdfPayload = await replanPdfResponse.json()
+  if (!replanPdfResponse.ok() || !replanPdfPayload.book?.sourceRetained) {
+    throw new Error(`Text PDF upload did not retain a replan source: ${replanPdfResponse.status()} ${JSON.stringify(replanPdfPayload)}`)
+  }
+  if ('sourcePath' in replanPdfPayload.book || 'userId' in replanPdfPayload.book || 'sourceTemporary' in replanPdfPayload.book) {
+    throw new Error(`Public book payload exposed internal storage fields: ${JSON.stringify(replanPdfPayload.book)}`)
+  }
+  const legacyUnitCount = replaceBookUnitsWithLegacyFragments(replanPdfPayload.book.id)
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.locator('.book-card').filter({ hasText: 'e2e-replan' }).getByRole('button', { name: '打开' }).click()
+  await page.getByRole('heading', { name: '学习单元' }).waitFor()
+  let replanDialogText = ''
+  page.once('dialog', async (dialog) => {
+    replanDialogText = dialog.message()
+    await dialog.accept()
+  })
+  const replanApplyResponsePromise = page.waitForResponse((response) => {
+    if (!response.url().includes(`/api/books/${replanPdfPayload.book.id}/replan`) || response.request().method() !== 'POST') return false
+    try {
+      return response.request().postDataJSON()?.preview !== true
+    } catch {
+      return false
+    }
+  })
+  await page.getByRole('button', { name: '重新规划单元' }).click()
+  const replanApplyResponse = await replanApplyResponsePromise
+  const replanApplyPayload = await replanApplyResponse.json()
+  if (!replanApplyResponse.ok() || !replanApplyPayload.preview?.allowed) {
+    throw new Error(`Safe unit replan failed: ${replanApplyResponse.status()} ${JSON.stringify(replanApplyPayload)}`)
+  }
+  if (!replanDialogText.includes(`当前：${legacyUnitCount} 个`) || !replanDialogText.includes('预计：')) {
+    throw new Error(`Unit replan confirmation did not show before/after statistics: ${replanDialogText}`)
+  }
+  if (replanApplyPayload.units.length >= legacyUnitCount || replanApplyPayload.preview.proposed.average < 900) {
+    throw new Error(`Unit replan did not merge legacy page fragments: ${JSON.stringify(replanApplyPayload.preview)}`)
+  }
+  await page.getByText(`已将 ${legacyUnitCount} 个旧单元重新规划为 ${replanApplyPayload.units.length} 个新单元。`).waitFor()
+
+  setTemporaryPodcastBlocker(replanPdfPayload.book.id, true)
+  try {
+    const blockedReplanResponse = await page.request.post(`${baseUrl}/api/books/${replanPdfPayload.book.id}/replan`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { preview: true },
+    })
+    const blockedReplanPayload = await blockedReplanResponse.json()
+    if (!blockedReplanResponse.ok() || blockedReplanPayload.preview?.allowed || !blockedReplanPayload.preview?.blockers?.some((item) => item.includes('播客'))) {
+      throw new Error(`Podcast data did not block unit replan: ${blockedReplanResponse.status()} ${JSON.stringify(blockedReplanPayload)}`)
+    }
+  } finally {
+    setTemporaryPodcastBlocker(replanPdfPayload.book.id, false)
+  }
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
 
   const ocrUploadStartedAt = Date.now()
   const ocrUploadResponse = await page.request.post(`${baseUrl}/api/books/upload`, {

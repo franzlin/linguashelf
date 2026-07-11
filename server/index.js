@@ -99,6 +99,7 @@ const geminiTtsProviderCooldowns = new Map()
 const microCompletionLocks = new Map()
 const unitCompletionLocks = new Map()
 const unitProgressLocks = new Map()
+const bookReplanLocks = new Set()
 const ocrSlotWaiters = []
 const uploadParseWaiters = []
 const dbSnapshotMeta = Symbol('dbSnapshotMeta')
@@ -1708,41 +1709,125 @@ function planUnits(bookId, chapters, sourceType) {
   return units.slice(0, maxUnits)
 }
 
-async function rebuildBookUnitsFromSource(db, book) {
-  if (!book?.sourcePath) {
-    const error = new Error('这本书没有保留原始文件，无法重建单元')
-    error.status = 409
-    throw error
+function sourceUnitStats(units) {
+  const counts = units.map((unit) => Number(unit.sourceWordCount || wordCount(unit.sourceText || ''))).sort((a, b) => a - b)
+  const sum = counts.reduce((total, count) => total + count, 0)
+  return {
+    unitCount: counts.length,
+    min: counts[0] || 0,
+    median: counts[Math.floor(counts.length / 2)] || 0,
+    average: counts.length ? Math.round(sum / counts.length) : 0,
+    max: counts[counts.length - 1] || 0,
+    belowMergeMinimum: counts.filter((count) => count < sourceWordsMergeMin).length,
+    sourceWordsPerUnit,
+    sourceWordsMergeMin,
   }
+}
 
+function bookReplanSafety(db, book) {
   const existingUnits = db.units.filter((unit) => unit.bookId === book.id)
   const unitIds = new Set(existingUnits.map((unit) => unit.id))
-  const hasGenerated = existingUnits.some((unit) => unit.content || unit.status !== 'planned')
-  const hasProgress = db.progress.some((item) => unitIds.has(item.unitId))
-  const hasReports = db.reports.some((item) => item.bookId === book.id || unitIds.has(item.unitId))
-  const hasActiveJobs = db.jobs.some(
+  const generatedUnitCount = existingUnits.filter((unit) => unit.content || unit.status !== 'planned').length
+  const progressCount = db.progress.filter((item) => unitIds.has(item.unitId)).length
+  const reportCount = db.reports.filter((item) => item.bookId === book.id || unitIds.has(item.unitId)).length
+  const podcastCount = db.podcasts.filter((item) => item.bookId === book.id).length
+  const activeJobCount = db.jobs.filter(
     (job) => (job.bookId === book.id || unitIds.has(job.unitId)) && ['queued', 'running', 'paused'].includes(job.status)
-  )
-  if (hasGenerated || hasProgress || hasReports || hasActiveJobs) {
-    const error = new Error('这本书已有生成内容、学习进度或任务，暂不自动重建单元')
-    error.status = 409
-    throw error
+  ).length
+  const historicalJobCount = db.jobs.filter((job) => job.bookId === book.id || unitIds.has(job.unitId)).length
+  const blockers = []
+  if (!book.sourcePath) blockers.push('这本书没有保留原始文件')
+  if (book.status && book.status !== 'ready') blockers.push('书籍仍在处理或解析失败')
+  if (generatedUnitCount) blockers.push(`已有 ${generatedUnitCount} 个生成或完成单元`)
+  if (progressCount) blockers.push(`已有 ${progressCount} 条学习进度`)
+  if (reportCount) blockers.push(`已有 ${reportCount} 份学习报告`)
+  if (podcastCount) blockers.push(`已有 ${podcastCount} 个播客`)
+  if (activeJobCount) blockers.push(`已有 ${activeJobCount} 个活动任务`)
+  return {
+    allowed: blockers.length === 0,
+    blockers,
+    existingUnits,
+    historicalJobCount,
+  }
+}
+
+function replanBlockedError(blockers) {
+  const error = new Error(`暂不能重建学习单元：${blockers.join('；')}`)
+  error.status = 409
+  return error
+}
+
+async function prepareBookUnitReplan(db, book) {
+  const safety = bookReplanSafety(db, book)
+  if (book.sourcePath) {
+    try {
+      const stat = await fs.stat(book.sourcePath)
+      if (!stat.isFile()) safety.blockers.push('保留的原始文件不可用')
+    } catch {
+      safety.blockers.push('保留的原始文件已丢失')
+    }
+  }
+  safety.allowed = safety.blockers.length === 0
+  const previous = sourceUnitStats(safety.existingUnits)
+  if (!safety.allowed) {
+    return {
+      allowed: false,
+      blockers: safety.blockers,
+      previous,
+      proposed: null,
+      historicalJobCount: safety.historicalJobCount,
+    }
   }
 
   const buffer = await fs.readFile(book.sourcePath)
   const parsed = book.type === 'epub' ? await parseEpub(buffer, book.filename) : await parsePdf(buffer, book.filename)
   const units = planUnits(book.id, parsed.chapters, parsed.type)
+  return {
+    allowed: true,
+    blockers: [],
+    previous,
+    proposed: sourceUnitStats(units),
+    historicalJobCount: safety.historicalJobCount,
+    parsed,
+    units,
+  }
+}
+
+function applyBookUnitReplan(db, book, prepared) {
+  const existingUnits = db.units.filter((unit) => unit.bookId === book.id)
+  const unitIds = new Set(existingUnits.map((unit) => unit.id))
   db.units = db.units.filter((unit) => unit.bookId !== book.id)
-  db.units.push(...units)
+  db.units.push(...prepared.units)
   db.jobs = db.jobs.filter((job) => job.bookId !== book.id && !unitIds.has(job.unitId))
-  book.chapterCount = parsed.chapters.length
-  book.wordCount = parsed.chapters.reduce((total, chapter) => total + Number(chapter.wordCount || wordCount(chapter.text)), 0)
+  book.chapterCount = prepared.parsed.chapters.length
+  book.wordCount = prepared.parsed.chapters.reduce((total, chapter) => total + Number(chapter.wordCount || wordCount(chapter.text)), 0)
   book.status = 'ready'
   book.updatedAt = new Date().toISOString()
   return {
     book,
-    units,
+    units: prepared.units,
     previousUnitCount: existingUnits.length,
+    preview: {
+      allowed: true,
+      blockers: [],
+      previous: sourceUnitStats(existingUnits),
+      proposed: sourceUnitStats(prepared.units),
+      historicalJobCount: prepared.historicalJobCount,
+    },
+  }
+}
+
+async function withBookReplanLock(bookId, task) {
+  if (bookReplanLocks.has(bookId)) {
+    const error = new Error('这本书正在重新规划学习单元')
+    error.status = 409
+    throw error
+  }
+  bookReplanLocks.add(bookId)
+  try {
+    return await task()
+  } finally {
+    bookReplanLocks.delete(bookId)
   }
 }
 
@@ -3344,10 +3429,11 @@ async function generatePodcastScript(sourceText, lexile, episodeNumber = 1, kind
 }
 
 function summarizeBook(book, units) {
+  const { userId, sourcePath, sourceTemporary, ...safeBook } = book
   const total = units.length
   const generated = units.filter((unit) => unit.status !== 'planned').length
   const completed = units.filter((unit) => unit.status === 'completed').length
-  return { ...book, totalUnits: total, generatedUnits: generated, completedUnits: completed }
+  return { ...safeBook, sourceRetained: Boolean(sourcePath), totalUnits: total, generatedUnits: generated, completedUnits: completed }
 }
 
 const glossaryCategoryLabels = {
@@ -7543,18 +7629,68 @@ async function createApp() {
 
   app.post('/api/books/:bookId/replan', auth, async (req, res, next) => {
     try {
+      const previewOnly = req.body?.preview === true
       const db = req.db
       const book = db.books.find((item) => item.id === req.params.bookId && item.userId === req.user.id)
       if (!book) {
         res.status(404).json({ error: '未找到这本书' })
         return
       }
-      const result = await rebuildBookUnitsFromSource(db, book)
-      await writeDb(db)
+      if (!consumeUserQuota(req, res, 'upload')) return
+      if (previewOnly) {
+        const prepared = await withUploadParseSlot(() => prepareBookUnitReplan(db, book))
+        res.json({
+          preview: {
+            allowed: prepared.allowed,
+            blockers: prepared.blockers,
+            previous: prepared.previous,
+            proposed: prepared.proposed,
+            historicalJobCount: prepared.historicalJobCount,
+          },
+        })
+        return
+      }
+
+      const expectedPreviousUnitCount = Number(req.body?.expectedPreviousUnitCount)
+      const result = await withBookReplanLock(book.id, async () => {
+        const initialDb = await readDb()
+        const initialBook = initialDb.books.find((item) => item.id === book.id && item.userId === req.user.id)
+        if (!initialBook) {
+          const error = new Error('未找到这本书')
+          error.status = 404
+          throw error
+        }
+        const prepared = await withUploadParseSlot(() => prepareBookUnitReplan(initialDb, initialBook))
+        if (!prepared.allowed) throw replanBlockedError(prepared.blockers)
+        if (Number.isInteger(expectedPreviousUnitCount) && prepared.previous.unitCount !== expectedPreviousUnitCount) {
+          const error = new Error('单元数量在确认后发生变化，请重新预览')
+          error.status = 409
+          throw error
+        }
+
+        const latestDb = await readDb()
+        const latestBook = latestDb.books.find((item) => item.id === book.id && item.userId === req.user.id)
+        if (!latestBook) {
+          const error = new Error('未找到这本书')
+          error.status = 404
+          throw error
+        }
+        const latestSafety = bookReplanSafety(latestDb, latestBook)
+        if (!latestSafety.allowed) throw replanBlockedError(latestSafety.blockers)
+        if (latestSafety.existingUnits.length !== prepared.previous.unitCount) {
+          const error = new Error('单元或学习状态在重建过程中发生变化，请重新预览')
+          error.status = 409
+          throw error
+        }
+        const applied = applyBookUnitReplan(latestDb, latestBook, prepared)
+        await writeDb(latestDb)
+        return { ...applied, db: latestDb }
+      })
       res.json({
-        book: { ...summarizeBook(book, result.units), glossary: buildBookGlossary(book, result.units) },
-        units: result.units.map((unit) => publicUnit(unit, db, req.user.id)),
+        book: { ...summarizeBook(result.book, result.units), glossary: buildBookGlossary(result.book, result.units) },
+        units: result.units.map((unit) => publicUnit(unit, result.db, req.user.id)),
         previousUnitCount: result.previousUnitCount,
+        preview: result.preview,
       })
     } catch (error) {
       next(error)
@@ -8511,25 +8647,30 @@ async function runReplanBookCli() {
   const db = await readDb()
   const bookId = cliArgValue('--book-id')
   const title = cliArgValue('--book-title')
+  const previewOnly = process.argv.includes('--preview')
   const book = db.books.find((item) => (bookId && item.id === bookId) || (title && String(item.title || item.filename || '').includes(title)))
   if (!book) throw new Error('未找到要重建单元的书籍，请提供 --book-id 或 --book-title')
-  const result = await rebuildBookUnitsFromSource(db, book)
-  await writeDb(db)
-  const counts = result.units.map((unit) => Number(unit.sourceWordCount || 0)).sort((a, b) => a - b)
-  const sum = counts.reduce((total, count) => total + count, 0)
+  const prepared = await prepareBookUnitReplan(db, book)
+  if (!prepared.allowed) throw replanBlockedError(prepared.blockers)
+  const result = previewOnly
+    ? { units: prepared.units, previousUnitCount: prepared.previous.unitCount, preview: prepared }
+    : applyBookUnitReplan(db, book, prepared)
+  if (!previewOnly) await writeDb(db)
   console.log(
     JSON.stringify(
       {
+        mode: previewOnly ? 'preview' : 'applied',
         bookId: book.id,
         title: book.title,
         previousUnitCount: result.previousUnitCount,
         unitCount: result.units.length,
-        sourceWordsPerUnit,
-        sourceWordsMergeMin,
-        min: counts[0] || 0,
-        median: counts[Math.floor(counts.length / 2)] || 0,
-        avg: counts.length ? Math.round(sum / counts.length) : 0,
-        max: counts[counts.length - 1] || 0,
+        sourceWordsPerUnit: result.preview.proposed.sourceWordsPerUnit,
+        sourceWordsMergeMin: result.preview.proposed.sourceWordsMergeMin,
+        min: result.preview.proposed.min,
+        median: result.preview.proposed.median,
+        avg: result.preview.proposed.average,
+        max: result.preview.proposed.max,
+        belowMergeMinimum: result.preview.proposed.belowMergeMinimum,
       },
       null,
       2

@@ -45,11 +45,38 @@ export type Book = {
   totalUnits: number
   generatedUnits: number
   completedUnits: number
+  sourceRetained?: boolean
   status?: 'ready' | 'processing' | 'failed'
   error?: string
   processingJobId?: string
   createdAt: string
   glossary?: BookGlossary
+}
+
+export type SourceUnitStats = {
+  unitCount: number
+  min: number
+  median: number
+  average: number
+  max: number
+  belowMergeMinimum: number
+  sourceWordsPerUnit: number
+  sourceWordsMergeMin: number
+}
+
+export type BookReplanPreview = {
+  allowed: boolean
+  blockers: string[]
+  previous: SourceUnitStats
+  proposed: SourceUnitStats | null
+  historicalJobCount: number
+}
+
+export type BookReplanResponse = {
+  preview: BookReplanPreview
+  book?: Book
+  units?: Unit[]
+  previousUnitCount?: number
 }
 
 export type BookGlossary = {

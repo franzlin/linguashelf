@@ -24,7 +24,7 @@ import { listeningLevelOptions, readingLevelOptions } from '../config/learning'
 import { requestJson, sessionFetch } from '../lib/api'
 import { abortableDelay } from '../lib/async'
 import { formatBytes, formatDuration, formatNumber } from '../lib/format'
-import type { Book, BookGlossaryItem, GenerationJob, Podcast, PodcastKind, Unit, UserSettings } from '../types/domain'
+import type { Book, BookGlossaryItem, BookReplanResponse, GenerationJob, Podcast, PodcastKind, Unit, UserSettings } from '../types/domain'
 
 const podcastKindOrder: PodcastKind[] = ['preview', 'review', 'topic', 'walkthrough']
 const maxConsecutivePodcastPollFailures = 4
@@ -134,6 +134,7 @@ export function BookPage({
   onOpenUnit,
   onRegenerateUnit,
   onPreGenerateBook,
+  onReplanBook,
   onRenameBook,
   onDeleteBook,
   onError,
@@ -146,6 +147,7 @@ export function BookPage({
   onOpenUnit: (unit: Unit) => void
   onRegenerateUnit: (unit: Unit, levels?: { readingLevel?: string; listeningLevel?: string; fidelityMode?: 'strict' }) => Promise<Unit | null>
   onPreGenerateBook: (book: Book, options: { count: number; readingLevel?: string; listeningLevel?: string }) => Promise<number>
+  onReplanBook: (book: Book, options: { preview?: boolean; expectedPreviousUnitCount?: number }) => Promise<BookReplanResponse | null>
   onRenameBook: (book: Book, title: string) => Promise<Book | null>
   onDeleteBook: (book: Book) => Promise<boolean>
   onError: (message: string) => void
@@ -156,6 +158,8 @@ export function BookPage({
   const [savingBookTitle, setSavingBookTitle] = useState(false)
   const [deletingBook, setDeletingBook] = useState(false)
   const [batching, setBatching] = useState(false)
+  const [replanning, setReplanning] = useState(false)
+  const [replanMessage, setReplanMessage] = useState('')
   const [batchCount, setBatchCount] = useState(3)
   const [readingLevel, setReadingLevel] = useState(settings.readingLevel)
   const [listeningLevel, setListeningLevel] = useState(settings.listeningLevel)
@@ -187,6 +191,7 @@ export function BookPage({
     setAudioUrls({})
     setScriptTexts({})
     setLoadingScriptId('')
+    setReplanMessage('')
     loadPodcasts(book.id, controller.signal)
     return () => {
       controller.abort()
@@ -220,6 +225,33 @@ export function BookPage({
       await onPreGenerateBook(book, { count: batchCount, readingLevel, listeningLevel })
     } finally {
       setBatching(false)
+    }
+  }
+
+  async function replanUnits() {
+    setReplanning(true)
+    setReplanMessage('')
+    try {
+      const result = await onReplanBook(book, { preview: true })
+      const preview = result?.preview
+      if (!preview) return
+      if (!preview.allowed || !preview.proposed) {
+        onError(preview.blockers.length ? `暂不能重新规划：${preview.blockers.join('；')}` : '暂不能重新规划学习单元')
+        return
+      }
+      const historicalJobs = preview.historicalJobCount ? `；会清理 ${preview.historicalJobCount} 条旧任务记录` : ''
+      const confirmed = window.confirm(
+        `重新规划《${book.title}》的学习单元？\n\n` +
+          `当前：${preview.previous.unitCount} 个，平均 ${preview.previous.average} 词，中位数 ${preview.previous.median} 词。\n` +
+          `预计：${preview.proposed.unitCount} 个，平均 ${preview.proposed.average} 词，中位数 ${preview.proposed.median} 词。\n\n` +
+          `此操作只允许用于没有生成内容、学习进度、报告和播客的书籍${historicalJobs}。原始文件和书籍信息会保留。`
+      )
+      if (!confirmed) return
+      const applied = await onReplanBook(book, { expectedPreviousUnitCount: preview.previous.unitCount })
+      if (!applied?.book || !applied.units) return
+      setReplanMessage(`已将 ${preview.previous.unitCount} 个旧单元重新规划为 ${applied.units.length} 个新单元。`)
+    } finally {
+      setReplanning(false)
     }
   }
 
@@ -668,6 +700,16 @@ export function BookPage({
           </div>
         </div>
         <div className="batch-control">
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={replanUnits}
+            disabled={replanning || !book.sourceRetained || book.status !== 'ready'}
+            title={book.sourceRetained ? '先预览新的单元数量和词数，再确认是否应用' : '这本书没有保留原始文件'}
+          >
+            {replanning ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+            重新规划单元
+          </button>
           <input
             aria-label="预生成数量"
             min={1}
@@ -682,6 +724,13 @@ export function BookPage({
           </button>
         </div>
       </div>
+
+      {replanMessage && (
+        <div className="notice success">
+          <Check size={18} />
+          <span>{replanMessage}</span>
+        </div>
+      )}
 
       <section className="podcast-section">
         <div className="block-title">
