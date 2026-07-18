@@ -23,7 +23,7 @@ import { Stat } from '../components/ui/Metrics'
 import { listeningLevelOptions, readingLevelOptions } from '../config/learning'
 import { requestJson, sessionFetch } from '../lib/api'
 import { abortableDelay } from '../lib/async'
-import { formatBytes, formatDuration, formatNumber } from '../lib/format'
+import { formatBookTitle, formatBytes, formatDisplayText, formatDuration, formatNumber } from '../lib/format'
 import type { Book, BookGlossaryItem, BookReplanResponse, GenerationJob, Podcast, PodcastKind, Unit, UserSettings } from '../types/domain'
 
 const podcastKindOrder: PodcastKind[] = ['preview', 'review', 'topic', 'walkthrough']
@@ -628,13 +628,13 @@ export function BookPage({
             </div>
           ) : (
             <div className="book-title-line">
-              <h1>{book.title}</h1>
+              <h1>{formatBookTitle(book.title)}</h1>
               <button className="icon-button title-edit-button" type="button" onClick={() => setRenamingBook(true)} aria-label="重命名书籍" title="重命名">
                 <Pencil size={18} />
               </button>
             </div>
           )}
-          <p>{book.author || book.filename}</p>
+          <p>{formatDisplayText(book.author || book.filename)}</p>
         </div>
         <button className="ghost-button danger-button" type="button" onClick={deleteCurrentBook} disabled={deletingBook}>
           {deletingBook ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}

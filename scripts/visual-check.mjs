@@ -108,16 +108,18 @@ try {
   await page.reload({ waitUntil: 'networkidle' })
   await page.locator('.app-shell').waitFor({ state: 'visible' })
   await page.locator('[data-mobile-nav-view="library"]').click()
-  await page.locator('.upload-dropzone').waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: '导入书籍' }).waitFor({ state: 'visible' })
   await page.screenshot({ path: path.join(outputDir, 'library-mobile-390.png'), fullPage: true })
 
   const viewportAudit = await page.evaluate(() => {
     const navButtons = [...document.querySelectorAll('.mobile-nav button')]
+    const activeNavButton = document.querySelector('.mobile-nav button.active')
     return {
       viewportWidth: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
       mobileNavVisible: getComputedStyle(document.querySelector('.mobile-nav')).display !== 'none',
       smallestNavTarget: Math.min(...navButtons.map((button) => button.getBoundingClientRect().height)),
+      activeMobileView: activeNavButton?.getAttribute('data-mobile-nav-view') || '',
     }
   })
 
@@ -126,6 +128,7 @@ try {
   }
   if (!viewportAudit.mobileNavVisible) throw new Error('390px 移动导航不可见')
   if (viewportAudit.smallestNavTarget < 44) throw new Error(`移动导航触控高度不足：${viewportAudit.smallestNavTarget}px`)
+  if (viewportAudit.activeMobileView !== 'library') throw new Error(`移动导航高亮与页面不一致：${viewportAudit.activeMobileView || '无高亮'} ≠ library`)
 
   await page.getByRole('button', { name: '更多' }).click()
   await page.getByRole('dialog', { name: '更多导航' }).waitFor({ state: 'visible' })

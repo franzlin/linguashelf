@@ -766,6 +766,46 @@ try {
   }
   await page.screenshot({ path: path.join(screenshotDir, 'library-upload.png'), fullPage: true })
 
+  const libraryAppPayload = await (
+    await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })
+  ).json()
+  const libraryLayoutBook = libraryAppPayload.books.find((book) => book.title === 'E2E History Reader')
+  const mojibakeBookTitle = 'Ottoman expansion and military power, 1300â\u0080\u00931453 -- Illustrated edition -- 9780465008506 -- 22f15bb1a2194c34bd06ba3c0fdaf0dc -- Annaâ\u0080\u0099s Archive'
+  const displayBookTitle = 'Ottoman expansion and military power, 1300–1453'
+  const renameForLayoutResponse = await page.request.patch(`${baseUrl}/api/books/${libraryLayoutBook.id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { title: mojibakeBookTitle },
+  })
+  if (!renameForLayoutResponse.ok()) throw new Error(`Preparing library layout fixture failed with HTTP ${renameForLayoutResponse.status()}`)
+
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  await page.getByRole('heading', { name: displayBookTitle }).waitFor()
+  await page.setViewportSize({ width: 390, height: 844 })
+  const libraryLayoutAudit = await page.evaluate(() => {
+    const cards = [...document.querySelectorAll('.book-card')]
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      overflowingCards: cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
+    }
+  })
+  if (libraryLayoutAudit.scrollWidth > libraryLayoutAudit.viewportWidth + 1 || libraryLayoutAudit.overflowingCards) {
+    throw new Error(`Library cards overflowed at 390px: ${JSON.stringify(libraryLayoutAudit)}`)
+  }
+  await page.screenshot({ path: path.join(screenshotDir, 'library-mobile-long-title.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
+  const restoreLibraryTitleResponse = await page.request.patch(`${baseUrl}/api/books/${libraryLayoutBook.id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { title: 'E2E History Reader' },
+  })
+  if (!restoreLibraryTitleResponse.ok()) throw new Error(`Restoring library layout fixture failed with HTTP ${restoreLibraryTitleResponse.status()}`)
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+  await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+
   const replanPdfResponse = await page.request.post(`${baseUrl}/api/books/upload`, {
     headers: { Authorization: `Bearer ${token}` },
     multipart: {

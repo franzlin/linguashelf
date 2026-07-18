@@ -6,6 +6,33 @@ export function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
 }
 
+const mojibakeMarker = /(?:Ã.|Â.|â[\u0080-\u00bf]{2})/
+
+export function formatDisplayText(value?: string | null) {
+  const text = String(value || '').trim()
+  if (!text || !mojibakeMarker.test(text)) return text
+  if ([...text].some((character) => (character.codePointAt(0) || 0) > 255)) return text
+
+  try {
+    const bytes = Uint8Array.from([...text], (character) => character.charCodeAt(0))
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return decoded.includes('\ufffd') ? text : decoded
+  } catch {
+    return text
+  }
+}
+
+export function formatBookTitle(value?: string | null) {
+  let title = formatDisplayText(value).replace(/\.(?:epub|pdf)$/i, '').trim()
+  const archiveMetadata = /(?:Anna.?s Archive|Z-Library|\b[a-f0-9]{32}\b)/i.test(title)
+  if (archiveMetadata && title.includes(' -- ')) title = title.split(' -- ')[0].trim()
+  return title
+    .replace(/\s+_+\s+/g, ': ')
+    .replace(/\s+\(Z-Library\)\s*$/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 export function formatDecimal(value: number) {
   return Number(value || 0).toFixed(1)
 }

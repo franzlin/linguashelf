@@ -4,7 +4,7 @@ import { OptionSegment, Segmented } from '../components/ui/Controls'
 import { SmallEmpty, Stat } from '../components/ui/Metrics'
 import { microDifficultyOptions, microPracticeTopicOptions, microPracticeTypeOptions } from '../config/learning'
 import { requestJson, sessionFetch } from '../lib/api'
-import { formatDateTime, formatPercent } from '../lib/format'
+import { formatBookTitle, formatDateTime, formatPercent } from '../lib/format'
 import type { View } from '../navigation'
 import type { AppData, Book, MicroAttempt, MicroPractice, MicroPracticeTopic, MicroPracticeType, UserSettings } from '../types/domain'
 
@@ -250,7 +250,7 @@ export function MicroPracticePage({
               <select className="micro-select" value={bookId} onChange={(event) => setBookId(event.target.value)} aria-label="选择书籍">
                 <option value="">自动选择最近书籍</option>
                 {books.map((book) => (
-                  <option key={book.id} value={book.id}>{book.title}</option>
+                  <option key={book.id} value={book.id}>{formatBookTitle(book.title)}</option>
                 ))}
               </select>
             )}

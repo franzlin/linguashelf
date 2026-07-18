@@ -504,7 +504,7 @@ h1 {
 }
 
 .book-card {
-  min-height: 238px;
+  min-height: 292px;
   padding: 24px;
   background: linear-gradient(155deg, #fffdf8 68%, #f1eee3);
 }
@@ -940,6 +940,32 @@ h1 {
   .page-section {
     padding: 20px;
     border-radius: 18px;
+  }
+
+  .library-page {
+    gap: 14px;
+  }
+
+  .library-page .upload-dropzone {
+    display: none;
+  }
+
+  .book-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .book-card {
+    min-height: 0;
+    padding: 20px;
+  }
+
+  .book-actions {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .book-action-buttons {
+    flex-wrap: nowrap;
   }
 
   .continue-panel {

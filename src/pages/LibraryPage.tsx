@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent } from 'react'
 import { Check, FileText, Loader2, Trash2, Upload, X } from 'lucide-react'
 import { requestJson } from '../lib/api'
-import { formatNumber } from '../lib/format'
+import { formatBookTitle, formatDisplayText, formatNumber } from '../lib/format'
 import type { Book, GenerationJob } from '../types/domain'
 
 type LibraryPageProps = {
@@ -20,6 +20,7 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
   const [dragActive, setDragActive] = useState(false)
   const [deletingBookId, setDeletingBookId] = useState('')
   const [uploadNotice, setUploadNotice] = useState('')
+  const completedUnitCount = books.reduce((total, book) => total + (book.completedUnits || 0), 0)
 
   async function uploadFile(file: File) {
     const lowerName = file.name.toLowerCase()
@@ -94,18 +95,18 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
   }
 
   return (
-    <section className="page-section">
+    <section className="library-page">
       <div className="section-head">
         <div>
           <h1>我的书库</h1>
-          <p>{books.length ? `${books.length} 本书正在学习` : '上传一本书开始训练'}</p>
+          <p>{books.length ? `${books.length} 本藏书 · ${completedUnitCount} 个单元已完成` : '导入一本书开始学习'}</p>
         </div>
         <div className="upload-actions">
           <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={uploading}>
             {uploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
-            上传 EPUB/PDF
+            导入书籍
           </button>
-          <span>PDF 支持文字抽取，扫描版会自动 OCR</span>
+          <span>EPUB / PDF · 英文扫描版自动 OCR</span>
         </div>
         <input
           ref={inputRef}
@@ -141,8 +142,8 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
       >
         <div className="upload-drop-icon">{uploading ? <Loader2 className="spin" size={24} /> : <Upload size={24} />}</div>
         <div>
-          <h2>{uploading ? '正在上传解析' : '拖放 EPUB/PDF 到这里'}</h2>
-          <p>也可以点击此区域选择文件。</p>
+          <h2>{uploading ? '正在导入并解析' : '拖放书籍文件，或点击选择'}</h2>
+          <p>支持 EPUB、文字 PDF 和清晰的英文扫描 PDF。</p>
         </div>
       </section>
 
@@ -156,6 +157,16 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
         <div className="book-grid">
           {books.map((book) => {
             const progress = book.totalUnits ? book.completedUnits / book.totalUnits : 0
+            const displayTitle = formatBookTitle(book.title) || '未命名书籍'
+            const displayAuthor = formatDisplayText(book.author)
+            const secondaryLabel = displayAuthor || (book.type === 'epub' ? 'EPUB 电子书' : 'PDF 文档')
+            const progressLabel = book.status === 'processing'
+              ? '正在识别文本'
+              : book.status === 'failed'
+                ? '导入失败'
+                : book.completedUnits > 0
+                  ? `已完成 ${book.completedUnits} / ${book.totalUnits}`
+                  : '尚未开始'
             return (
               <article key={book.id} className="book-card">
                 <div className="book-card-status">
@@ -163,8 +174,8 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
                   {book.status === 'processing' && <span className="status-pill running">OCR 处理中</span>}
                   {book.status === 'failed' && <span className="status-pill failed">解析失败</span>}
                 </div>
-                <h2>{book.title}</h2>
-                <p>{book.author || book.filename}</p>
+                <h2 title={displayTitle}>{displayTitle}</h2>
+                <p className="book-card-summary" title={secondaryLabel}>{secondaryLabel}</p>
                 {book.status === 'processing' && <p className="book-processing-note">后台识别中，可在任务中心查看页数进度。</p>}
                 {book.status === 'failed' && book.error && <p className="book-error-note">{book.error}</p>}
                 <div className="book-meta">
@@ -173,14 +184,20 @@ export function LibraryPage({ books, token, onUploaded, onOpenBook, onDeleteBook
                 </div>
                 <div className="progress-line" aria-label="学习进度"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div>
                 <div className="book-actions">
-                  <span>{book.completedUnits}/{book.totalUnits} 完成</span>
+                  <span className="book-progress-label">{progressLabel}</span>
                   <div className="book-action-buttons">
-                    <button type="button" onClick={() => onOpenBook(book)} disabled={book.status !== undefined && book.status !== 'ready'}>
+                    <button className="book-open-button" type="button" onClick={() => onOpenBook(book)} disabled={book.status !== undefined && book.status !== 'ready'}>
                       {book.status === 'processing' ? '解析中' : book.status === 'failed' ? '待重试' : '打开'}
                     </button>
-                    <button className="danger-button" type="button" onClick={() => deleteFromLibrary(book)} disabled={deletingBookId === book.id}>
+                    <button
+                      className="icon-button danger-button book-delete-button"
+                      type="button"
+                      onClick={() => deleteFromLibrary(book)}
+                      disabled={deletingBookId === book.id}
+                      aria-label={deletingBookId === book.id ? `正在删除《${displayTitle}》` : `删除《${displayTitle}》`}
+                      title="删除书籍"
+                    >
                       {deletingBookId === book.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
-                      删除
                     </button>
                   </div>
                 </div>

@@ -337,6 +337,17 @@ p {
   font-size: 0.86rem;
 }
 
+.library-page {
+  min-width: 0;
+  display: grid;
+  gap: 18px;
+}
+
+.library-page > .section-head {
+  margin-bottom: 0;
+  padding: 4px 2px;
+}
+
 .upload-dropzone {
   min-height: 128px;
   border: 1px dashed #9ab8ac;
@@ -585,7 +596,12 @@ p {
   background: var(--surface-2);
 }
 
-.book-grid,
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
 .vocab-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -858,10 +874,16 @@ p {
 }
 
 .book-card {
+  min-width: 0;
   padding: 18px;
   display: grid;
   gap: 14px;
+  overflow: hidden;
   box-shadow: var(--shadow);
+}
+
+.book-card > * {
+  min-width: 0;
 }
 
 .book-card-status {
@@ -890,6 +912,48 @@ p {
 .unit-main h2,
 .vocab-card h2 {
   overflow-wrap: anywhere;
+}
+
+.book-card h2 {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 1.08rem;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.book-card-summary {
+  min-height: 1.5em;
+  margin: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.book-card .book-meta {
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+
+.book-progress-label {
+  color: var(--muted);
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+.book-open-button {
+  min-width: 68px;
+}
+
+.book-actions .book-delete-button {
+  width: 42px;
+  min-width: 42px;
+  padding: 0;
 }
 
 .book-type,
@@ -3124,7 +3188,7 @@ p {
 
   .book-grid,
   .vocab-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .stat-row,

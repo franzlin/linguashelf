@@ -1,6 +1,6 @@
 import { BookOpen, FileText, Loader2, Upload } from 'lucide-react'
 import { Stat } from '../components/ui/Metrics'
-import { formatPercent } from '../lib/format'
+import { formatBookTitle, formatPercent } from '../lib/format'
 import type { View } from '../navigation'
 import type { AppData, Book, Unit } from '../types/domain'
 
@@ -25,7 +25,7 @@ export function HomePage({ data, onOpenUnit, onOpenBook, onNavigate }: HomePageP
           <div>
             <span className="eyebrow">继续学习</span>
             <h1>{continueUnit ? continueUnit.title : '还没有学习单元'}</h1>
-            <p>{continueBook ? `${continueBook.title} · ${continueUnit?.sourceLocation || ''}` : '上传一本书后，系统会在这里放下一篇最适合开始的材料。'}</p>
+            <p>{continueBook ? `${formatBookTitle(continueBook.title)} · ${continueUnit?.sourceLocation || ''}` : '上传一本书后，系统会在这里放下一篇最适合开始的材料。'}</p>
           </div>
           <div className="continue-actions">
             {continueUnit ? (
@@ -103,7 +103,7 @@ export function HomePage({ data, onOpenUnit, onOpenBook, onNavigate }: HomePageP
                 const progress = book.totalUnits ? book.completedUnits / book.totalUnits : 0
                 return (
                   <button key={book.id} type="button" onClick={() => onOpenBook(book)}>
-                    <span>{book.title}</span>
+                    <span>{formatBookTitle(book.title)}</span>
                     <strong>{book.completedUnits}/{book.totalUnits}</strong>
                     <div className="progress-line"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div>
                   </button>
