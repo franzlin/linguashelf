@@ -55,7 +55,7 @@ BACKUP_ENCRYPTION_KEY=建议填一段足够长的随机口令
 BACKUP_ENCRYPTION_REQUIRED=true
 ```
 
-播客 TTS 顺序固定为 DashScope Qwen 主来源、Gemini 3.1 兜底、Gemini 2.5 二级兜底。`GEMINI_TTS_OFFICIAL_*` 是历史兼容变量名，可继续指向 Yunwu 这类 Gemini 兼容源；无需配置 Google 官方 key。
+播客 TTS 默认顺序为 DashScope Qwen、Gemini 3.1、Gemini 2.5。管理员可以在网页“AI 服务”页随时调整三个来源的全局优先级，之后开始合成的任务会按保存顺序尝试；“用备用源重试”会跳过 Qwen，但仍遵循两个 Gemini 来源的当前排序。`GEMINI_TTS_OFFICIAL_*` 是历史兼容变量名，可继续指向 Yunwu 这类 Gemini 兼容源；无需配置 Google 官方 key。
 
 生产环境建议保持：
 

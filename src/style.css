@@ -2546,6 +2546,118 @@ p {
   margin-bottom: 0;
 }
 
+.tts-priority-panel {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 0;
+  display: grid;
+  gap: 12px;
+}
+
+.tts-priority-head,
+.tts-priority-row,
+.tts-priority-actions {
+  display: flex;
+  align-items: center;
+}
+
+.tts-priority-head {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tts-priority-head span {
+  color: var(--blue);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.tts-priority-head h2 {
+  margin-top: 2px;
+}
+
+.tts-priority-head p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.tts-priority-head > strong {
+  min-width: 64px;
+  min-height: 24px;
+  color: var(--green);
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.tts-priority-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tts-priority-row {
+  min-width: 0;
+  min-height: 62px;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.tts-priority-index {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--blue);
+  background: var(--blue-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  font-weight: 800;
+}
+
+.tts-priority-row > div:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1;
+}
+
+.tts-priority-row > div:nth-child(2) strong,
+.tts-priority-row > div:nth-child(2) span {
+  overflow-wrap: anywhere;
+}
+
+.tts-priority-row > div:nth-child(2) span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.tts-priority-actions {
+  gap: 4px;
+}
+
+.tts-priority-actions button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tts-priority-actions button:disabled {
+  opacity: 0.35;
+}
+
 .service-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3156,6 +3268,7 @@ p {
 
   .password-form,
   .deployment-grid,
+  .tts-priority-list,
   .service-grid,
   .service-facts,
   .usage-grid,
@@ -3167,6 +3280,11 @@ p {
 
   .service-check {
     display: grid;
+  }
+
+  .tts-priority-actions button {
+    width: 44px;
+    height: 44px;
   }
 
   .admin-panel-head {

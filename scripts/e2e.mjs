@@ -662,6 +662,48 @@ try {
     throw new Error(`DashScope TTS request was malformed: ${JSON.stringify(dashscopeRequest)}`)
   }
 
+  const reorderedTtsPriority = ['gemini-fallback', 'official-gemini', 'dashscope-qwen']
+  const priorityResponse = await page.request.patch(`${baseUrl}/api/ai/services/podcast-tts-priority`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { priority: reorderedTtsPriority },
+  })
+  const priorityPayload = await priorityResponse.json()
+  if (
+    !priorityResponse.ok() ||
+    priorityPayload.podcastTtsPriority?.map((item) => item.id).join(',') !== reorderedTtsPriority.join(',')
+  ) {
+    throw new Error(`Podcast TTS priority was not persisted: ${JSON.stringify(priorityPayload)}`)
+  }
+  const invalidPriorityResponse = await page.request.patch(`${baseUrl}/api/ai/services/podcast-tts-priority`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { priority: ['dashscope-qwen', 'dashscope-qwen', 'official-gemini'] },
+  })
+  if (invalidPriorityResponse.status() !== 400) throw new Error('Invalid podcast TTS priority was accepted')
+  await page.request.patch(`${baseUrl}/api/ai/services/podcast-tts-priority`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { priority: ['dashscope-qwen', 'official-gemini', 'gemini-fallback'] },
+  })
+
+  await page.getByLabel('主导航').getByRole('button', { name: '服务' }).click()
+  await page.locator('h1').filter({ hasText: 'AI 服务' }).waitFor()
+  await page.getByRole('heading', { name: '播客语音优先级' }).waitFor()
+  const moveQwenDown = page.getByRole('button', { name: '下移 Qwen TTS（DashScope）' })
+  if ((await moveQwenDown.count()) !== 1) throw new Error('Podcast TTS priority down control is missing')
+  const moveDownResponse = page.waitForResponse(
+    (response) => response.url().endsWith('/api/ai/services/podcast-tts-priority') && response.request().method() === 'PATCH'
+  )
+  await moveQwenDown.click()
+  if (!(await moveDownResponse).ok()) throw new Error('Podcast TTS priority down control failed')
+  const moveQwenUp = page.getByRole('button', { name: '上移 Qwen TTS（DashScope）' })
+  if ((await moveQwenUp.count()) !== 1) throw new Error('Podcast TTS priority up control is missing after reorder')
+  const moveUpResponse = page.waitForResponse(
+    (response) => response.url().endsWith('/api/ai/services/podcast-tts-priority') && response.request().method() === 'PATCH'
+  )
+  await moveQwenUp.click()
+  if (!(await moveUpResponse).ok()) throw new Error('Podcast TTS priority up control failed')
+  await page.getByLabel('主导航').getByRole('button', { name: '首页' }).click()
+  await page.getByRole('heading', { name: '首页' }).waitFor()
+
   const bearerFallbackResponse = await fetch(`${baseUrl}/api/app`, {
     headers: {
       Cookie: 'linguashelf_session=expired-cookie-value',

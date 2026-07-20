@@ -86,6 +86,12 @@ const podcastKindLabels = {
   topic: '全书专题',
   walkthrough: '全书分集讲解',
 }
+const podcastTtsProviderOrder = ['dashscope-qwen', 'official-gemini', 'gemini-fallback']
+const podcastTtsProviderLabels = {
+  'dashscope-qwen': 'Qwen TTS（DashScope）',
+  'official-gemini': 'Gemini 3.1',
+  'gemini-fallback': 'Gemini 2.5',
+}
 const aiRateLimits = {
   upload: { max: Number(process.env.RATE_LIMIT_UPLOAD_MAX || 8), windowMs: rateLimitWindowMs },
   'generate-unit': { max: Number(process.env.RATE_LIMIT_GENERATE_UNITS_MAX || 20), windowMs: rateLimitWindowMs },
@@ -134,6 +140,7 @@ const defaultDb = {
   vocabulary: [],
   definitions: [],
   settings: [],
+  appSettings: [],
   jobs: [],
   podcasts: [],
   microPractices: [],
@@ -567,6 +574,29 @@ function defaultPodcastVoice() {
 function normalizePodcastVoice(value) {
   const voice = String(value || '').trim()
   return dashscopeTtsVoices.has(voice) ? voice : defaultPodcastVoice()
+}
+
+function normalizePodcastTtsPriority(value) {
+  const requested = Array.isArray(value) ? value.map((item) => String(item || '').trim()) : []
+  return [...new Set([...requested.filter((item) => podcastTtsProviderOrder.includes(item)), ...podcastTtsProviderOrder])]
+}
+
+function podcastTtsPriority(db) {
+  const saved = db?.appSettings?.find((item) => item.id === 'podcast-tts-priority')
+  return normalizePodcastTtsPriority(saved?.value)
+}
+
+function savePodcastTtsPriority(db, value) {
+  const priority = normalizePodcastTtsPriority(value)
+  let setting = db.appSettings.find((item) => item.id === 'podcast-tts-priority')
+  const now = new Date().toISOString()
+  if (!setting) {
+    setting = { id: 'podcast-tts-priority', createdAt: now }
+    db.appSettings.push(setting)
+  }
+  setting.value = priority
+  setting.updatedAt = now
+  return priority
 }
 
 function canCreateUser(inviteCode) {
@@ -2745,7 +2775,7 @@ function geminiPrimaryTtsLabel(baseUrl) {
   const value = String(baseUrl || '').toLowerCase()
   if (value.includes('yunwu.ai')) return 'Yunwu Gemini 3.1'
   if (value.includes('generativelanguage.googleapis.com')) return '官方 Gemini 3.1'
-  return 'Gemini 3.1 主来源'
+  return 'Gemini 3.1'
 }
 
 function parseApiKeyList(...values) {
@@ -2859,7 +2889,7 @@ function geminiTtsFallbackProvider() {
   if (!fallbackKey) return null
   return {
     name: 'gemini-fallback',
-    label: 'Gemini TTS 兜底',
+    label: 'Gemini 2.5',
     baseUrl: process.env.GEMINI_TTS_BASE_URL || 'https://api.futureppo.top',
     apiKey: fallbackKey,
     model: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
@@ -2868,31 +2898,33 @@ function geminiTtsFallbackProvider() {
   }
 }
 
-function geminiTtsProviders(options = {}) {
-  const primaryProviders = geminiTtsPrimaryProviders()
+// Multiple Gemini 3.1 keys rotate inside their single priority slot.
+function rotatedGeminiPrimaryProviders() {
+  const providers = geminiTtsPrimaryProviders()
+  if (providers.length <= 1) return providers
+  const offset = geminiOfficialTtsCursor % providers.length
+  geminiOfficialTtsCursor += 1
+  return [...providers.slice(offset), ...providers.slice(0, offset)]
+}
+
+function orderedPodcastTtsProviders(priority, { includeQwen = true } = {}) {
+  const qwen = dashscopeTtsProvider()
+  const primaryProviders = rotatedGeminiPrimaryProviders()
   const fallback = geminiTtsFallbackProvider()
-  if (options.preferFallback && fallback) {
-    const now = Date.now()
-    return [fallback, ...primaryProviders].filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
-  }
   const providers = []
-  if (primaryProviders.length > 1) {
-    const offset = geminiOfficialTtsCursor % primaryProviders.length
-    geminiOfficialTtsCursor += 1
-    providers.push(...primaryProviders.slice(offset), ...primaryProviders.slice(0, offset))
-  } else {
-    providers.push(...primaryProviders)
+  for (const id of normalizePodcastTtsPriority(priority)) {
+    if (id === 'dashscope-qwen' && includeQwen && qwen) providers.push(qwen)
+    if (id === 'official-gemini') providers.push(...primaryProviders)
+    if (id === 'gemini-fallback' && fallback) providers.push(fallback)
   }
-  if (fallback) providers.push(fallback)
   const now = Date.now()
-  return providers.filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
+  return providers.filter(
+    (provider) => provider.name === 'dashscope-qwen' || (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now
+  )
 }
 
 function podcastTtsProviders(options = {}) {
-  const qwen = dashscopeTtsProvider()
-  const gemini = geminiTtsProviders(options)
-  if (options.preferFallback) return gemini
-  return qwen ? [qwen, ...gemini] : gemini
+  return orderedPodcastTtsProviders(options.priority, { includeQwen: !options.preferFallback })
 }
 
 async function requestGeminiTtsChunk(provider, text, voiceName) {
@@ -3114,11 +3146,13 @@ function buildAiServicesPayload(db, userId) {
   const ttsBaseUrl = process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
   const textConfigured = Boolean(process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
   const listeningTtsConfigured = Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
-  const primaryProvider = dashscopeTtsProvider()
-  const fallbackProviders = geminiTtsProviders()
-  const primaryConfigured = Boolean(primaryProvider) || process.env.AI_PROVIDER === 'mock'
-  const fallbackConfigured = fallbackProviders.length > 0 || process.env.AI_PROVIDER === 'mock'
-  const activeFallbackCooldowns = fallbackProviders.filter(
+  const priority = podcastTtsPriority(db)
+  const qwenProvider = dashscopeTtsProvider()
+  const gemini31Providers = geminiTtsPrimaryProviders()
+  const gemini25Provider = geminiTtsFallbackProvider()
+  const activeFallbackCooldowns = [...gemini31Providers, gemini25Provider].filter(
+    Boolean
+  ).filter(
     (provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) > Date.now()
   ).length
   const visionConfigured = shouldUseVisionOcr()
@@ -3153,41 +3187,56 @@ function buildAiServicesPayload(db, userId) {
       lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'listening-tts')),
     },
     {
-      id: 'podcast-tts-primary',
-      title: '播客 TTS 主来源',
-      role: '播客 MP3 合成，优先使用 DashScope 长文本语音',
+      id: 'podcast-tts-qwen',
+      title: 'Qwen 播客 TTS',
+      role: 'DashScope 长文本语音合成',
       category: 'audio',
-      priority: '第一优先',
-      configured: primaryConfigured,
-      status: serviceStatusFrom(primaryConfigured, serviceCheckFor(db, userId, 'podcast-tts-primary')),
-      provider: primaryProvider?.label || 'DashScope Qwen TTS',
-      model: primaryProvider?.model || process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus',
-      endpointHost: serviceEndpointHost(primaryProvider?.baseUrl || process.env.DASHSCOPE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1'),
+      priority: `第 ${priority.indexOf('dashscope-qwen') + 1} 优先`,
+      configured: Boolean(qwenProvider) || process.env.AI_PROVIDER === 'mock',
+      status: serviceStatusFrom(Boolean(qwenProvider) || process.env.AI_PROVIDER === 'mock', serviceCheckFor(db, userId, 'podcast-tts-qwen') || serviceCheckFor(db, userId, 'podcast-tts-primary')),
+      provider: qwenProvider?.label || 'DashScope Qwen TTS',
+      model: qwenProvider?.model || process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus',
+      endpointHost: serviceEndpointHost(qwenProvider?.baseUrl || process.env.DASHSCOPE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1'),
       details: [
         `音色：${defaultPodcastVoice()}`,
         `格式：24kHz 单声道 PCM`,
         `分块：最多约 ${formatServiceNumber(podcastTtsChunkChars)} 字`,
       ],
-      providers: primaryProvider
-        ? [{ role: 'primary', label: primaryProvider.label, model: primaryProvider.model, endpointHost: serviceEndpointHost(primaryProvider.baseUrl), keyId: '', cooldownUntil: '' }]
+      providers: qwenProvider
+        ? [{ role: 'podcast', label: qwenProvider.label, model: qwenProvider.model, endpointHost: serviceEndpointHost(qwenProvider.baseUrl), keyId: '', cooldownUntil: '' }]
         : [],
       warning: '',
-      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-primary')),
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-qwen') || serviceCheckFor(db, userId, 'podcast-tts-primary')),
     },
     {
-      id: 'podcast-tts-fallback',
-      title: '播客 TTS 兜底',
-      role: '主来源失败时自动接手',
+      id: 'podcast-tts-gemini-31',
+      title: 'Gemini 3.1 播客 TTS',
+      role: '支持独立排序的 Gemini 语音来源',
       category: 'audio',
-      priority: '备用',
-      configured: fallbackConfigured,
-      status: serviceStatusFrom(fallbackConfigured, serviceCheckFor(db, userId, 'podcast-tts-fallback')),
-      provider: fallbackProviders[0]?.label || 'Gemini TTS 兜底',
-      model: fallbackProviders.map((provider) => provider.model).join(' + ') || process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
-      endpointHost: serviceEndpointHost(fallbackProviders[0]?.baseUrl || process.env.GEMINI_TTS_BASE_URL || ''),
+      priority: `第 ${priority.indexOf('official-gemini') + 1} 优先`,
+      configured: gemini31Providers.length > 0 || process.env.AI_PROVIDER === 'mock',
+      status: serviceStatusFrom(gemini31Providers.length > 0 || process.env.AI_PROVIDER === 'mock', serviceCheckFor(db, userId, 'podcast-tts-gemini-31')),
+      provider: gemini31Providers[0]?.label || geminiPrimaryTtsLabel(process.env.GEMINI_TTS_OFFICIAL_BASE_URL || ''),
+      model: gemini31Providers[0]?.model || process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
+      endpointHost: serviceEndpointHost(gemini31Providers[0]?.baseUrl || process.env.GEMINI_TTS_OFFICIAL_BASE_URL || ''),
       details: [`音色：${process.env.GEMINI_TTS_VOICE || 'Kore'}`, `并发：${Math.max(1, Math.min(4, podcastTtsConcurrency))} 块`],
-      providers: fallbackProviders.map((provider) => publicGeminiProvider(provider, 'fallback')),
-      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-fallback')),
+      providers: gemini31Providers.map((provider) => publicGeminiProvider(provider, 'podcast')),
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-gemini-31')),
+    },
+    {
+      id: 'podcast-tts-gemini-25',
+      title: 'Gemini 2.5 播客 TTS',
+      role: '支持独立排序的 Gemini 兼容来源',
+      category: 'audio',
+      priority: `第 ${priority.indexOf('gemini-fallback') + 1} 优先`,
+      configured: Boolean(gemini25Provider) || process.env.AI_PROVIDER === 'mock',
+      status: serviceStatusFrom(Boolean(gemini25Provider) || process.env.AI_PROVIDER === 'mock', serviceCheckFor(db, userId, 'podcast-tts-gemini-25') || serviceCheckFor(db, userId, 'podcast-tts-fallback')),
+      provider: gemini25Provider?.label || 'Gemini 2.5 TTS',
+      model: gemini25Provider?.model || process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+      endpointHost: serviceEndpointHost(gemini25Provider?.baseUrl || process.env.GEMINI_TTS_BASE_URL || ''),
+      details: [`音色：${process.env.GEMINI_TTS_VOICE || 'Kore'}`, `并发：${Math.max(1, Math.min(4, podcastTtsConcurrency))} 块`],
+      providers: gemini25Provider ? [publicGeminiProvider(gemini25Provider, 'podcast')] : [],
+      lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-gemini-25') || serviceCheckFor(db, userId, 'podcast-tts-fallback')),
     },
     {
       id: 'vision-ocr',
@@ -3222,6 +3271,17 @@ function buildAiServicesPayload(db, userId) {
   const healthyCount = services.filter((service) => ['ok', 'configured', 'warning'].includes(service.status)).length
   return {
     updatedAt: new Date().toISOString(),
+    podcastTtsPriority: priority.map((id) => ({
+      id,
+      label: podcastTtsProviderLabels[id],
+      configured:
+        process.env.AI_PROVIDER === 'mock' ||
+        (id === 'dashscope-qwen'
+          ? Boolean(qwenProvider)
+          : id === 'official-gemini'
+            ? gemini31Providers.length > 0
+            : Boolean(gemini25Provider)),
+    })),
     overview: {
       configured: configuredCount,
       total: services.length,
@@ -3333,11 +3393,12 @@ async function runAiServiceTest(serviceId) {
     result = await testTextAiService()
   } else if (serviceId === 'listening-tts') {
     result = await testListeningTtsService()
-  } else if (serviceId === 'podcast-tts-primary') {
+  } else if (serviceId === 'podcast-tts-primary' || serviceId === 'podcast-tts-qwen') {
     result = await testPodcastTtsProvider(dashscopeTtsProvider())
-  } else if (serviceId === 'podcast-tts-fallback') {
-    const providers = geminiTtsProviders({ preferFallback: true })
-    result = await testPodcastTtsProvider(providers[0])
+  } else if (serviceId === 'podcast-tts-gemini-31') {
+    result = await testPodcastTtsProvider(geminiTtsPrimaryProviders()[0])
+  } else if (serviceId === 'podcast-tts-fallback' || serviceId === 'podcast-tts-gemini-25') {
+    result = await testPodcastTtsProvider(geminiTtsFallbackProvider())
   } else if (serviceId === 'vision-ocr') {
     if (!shouldUseVisionOcr()) throw new Error('未配置视觉 OCR 来源')
     result = {
@@ -6811,7 +6872,10 @@ async function processPodcastJob(jobId) {
         const progress = 35 + Math.round(percent * 0.6)
         await updatePodcastJobProgress(podcast.id, job.id, progress, `正在合成音频 ${done}/${total}`)
       },
-      { preferFallback: Boolean(job.preferTtsFallback || podcast.preferTtsFallback) }
+      {
+        preferFallback: Boolean(job.preferTtsFallback || podcast.preferTtsFallback),
+        priority: podcastTtsPriority(db),
+      }
     )
   } catch (error) {
     await persistAiUsage({
@@ -7297,11 +7361,7 @@ async function createApp() {
         ttsConfigured: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
         ttsProvider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
         podcastTtsConfigured: Boolean(process.env.DASHSCOPE_TTS_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY),
-        podcastTtsPrimary: process.env.DASHSCOPE_TTS_API_KEY
-          ? process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus'
-          : process.env.GEMINI_TTS_OFFICIAL_API_KEY
-            ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview'
-            : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+        podcastTtsPrimary: podcastTtsProviderLabels[podcastTtsPriority(db)[0]],
         podcastTtsInputTokenLimit: geminiTtsInputTokenLimit,
         podcastTtsOutputTokenLimit: geminiTtsOutputTokenLimit,
         podcastTtsChunkTokens,
@@ -7340,9 +7400,34 @@ async function createApp() {
     res.json(buildAiServicesPayload(req.db, req.user.id))
   })
 
+  app.patch('/api/ai/services/podcast-tts-priority', auth, requireAdmin, async (req, res) => {
+    const requested = Array.isArray(req.body.priority) ? req.body.priority : []
+    if (
+      requested.length !== podcastTtsProviderOrder.length ||
+      new Set(requested).size !== podcastTtsProviderOrder.length ||
+      requested.some((id) => !podcastTtsProviderOrder.includes(String(id)))
+    ) {
+      res.status(400).json({ error: '播客 TTS 优先级必须包含全部三个来源' })
+      return
+    }
+    savePodcastTtsPriority(req.db, requested)
+    await writeDb(req.db)
+    res.json(buildAiServicesPayload(req.db, req.user.id))
+  })
+
   app.post('/api/ai/services/:serviceId/test', auth, requireAdmin, async (req, res) => {
     const serviceId = String(req.params.serviceId || '')
-    const known = new Set(['text-ai', 'listening-tts', 'podcast-tts-primary', 'podcast-tts-fallback', 'vision-ocr', 'local-ocr'])
+    const known = new Set([
+      'text-ai',
+      'listening-tts',
+      'podcast-tts-primary',
+      'podcast-tts-fallback',
+      'podcast-tts-qwen',
+      'podcast-tts-gemini-31',
+      'podcast-tts-gemini-25',
+      'vision-ocr',
+      'local-ocr',
+    ])
     if (!known.has(serviceId)) {
       res.status(404).json({ error: '未知服务' })
       return

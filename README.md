@@ -134,12 +134,12 @@ DASHSCOPE_TTS_VOICE=longanlingxin
 DASHSCOPE_TTS_LANGUAGE=en
 DASHSCOPE_TTS_INSTRUCTION=Warm, calm educational podcast voice; natural pace, clear articulation, brief pauses; read exactly as written.
 GEMINI_TTS_OFFICIAL_BASE_URL=https://yunwu.ai
-GEMINI_TTS_OFFICIAL_API_KEY=你的 Gemini 3.1 主来源 key，多个 key 用英文逗号分隔
+GEMINI_TTS_OFFICIAL_API_KEY=你的 Gemini 3.1 来源 key，多个 key 用英文逗号分隔
 GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
 GEMINI_TTS_INPUT_TOKEN_LIMIT=8192
 GEMINI_TTS_OUTPUT_TOKEN_LIMIT=16384
 GEMINI_TTS_BASE_URL=https://api.futureppo.top
-GEMINI_TTS_API_KEY=你的 Gemini TTS 兜底渠道 key
+GEMINI_TTS_API_KEY=你的 Gemini 2.5 兼容来源 key
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
 GEMINI_TTS_VOICE=Kore
 GEMINI_TTS_31_INSTRUCTIONS=可选：覆盖 3.1 专属播客导演朗读指令
@@ -148,9 +148,9 @@ PODCAST_TTS_CHUNK_TOKENS=5500
 PODCAST_TTS_CHUNK_CHARS=2800
 ```
 
-设置页可以调整播客 Lexile 难度和 Qwen 音色（温暖知性的 `longanlingxin` 或明亮开朗的 `longanlufeng`）。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。Qwen 返回 24kHz 单声道 PCM，应用拼接后默认编码为 MP3（64kbps），编码失败会自动退回 WAV。脚本默认按不超过约 2800 字符分块。Gemini 兜底使用固定的 `GEMINI_TTS_VOICE`，不会把 Qwen 音色误传给 Gemini；任务中心的“用备用源重试”会跳过 Qwen。旧用户保存的 Kore/Puck/Charon/Aoede 会自动迁移到 Qwen 默认音色。
+设置页可以调整播客 Lexile 难度和 Qwen 音色（温暖知性的 `longanlingxin` 或明亮开朗的 `longanlufeng`）。管理员可在“AI 服务”页随时调整 Qwen、Gemini 3.1、Gemini 2.5 的全局优先顺序；顺序保存在数据库中并用于之后开始合成的播客任务。读前导入、读后复盘和全书分集讲解默认按约 2200 个源文本词分一集，最多 12 集；全书专题会从整本书抽代表性来源片段生成一集跨章节主题讲解。播客可以按顺序只生成下一集，也可以一次生成剩余全部。Qwen 返回 24kHz 单声道 PCM，应用拼接后默认编码为 MP3（64kbps），编码失败会自动退回 WAV。脚本默认按不超过约 2800 字符分块。Gemini 使用固定的 `GEMINI_TTS_VOICE`，不会把 Qwen 音色误传给 Gemini；任务中心的“用备用源重试”会跳过 Qwen，但仍遵循两个 Gemini 来源的网页排序。旧用户保存的 Kore/Puck/Charon/Aoede 会自动迁移到 Qwen 默认音色。
 
-导航里的“服务”页会展示文本生成、听力预热 TTS、播客 TTS 主来源/兜底、视觉 OCR、本地 OCR 的配置摘要和最近检查结果。服务页不会显示 API key；点击“测试”会发起一次轻量检查，默认由 `RATE_LIMIT_SERVICE_TEST_MAX` 限制每个用户每小时最多测试 12 次。
+导航里的“服务”页会展示文本生成、听力预热 TTS、三个可排序的播客 TTS 来源、视觉 OCR、本地 OCR 的配置摘要和最近检查结果。服务页不会显示 API key；点击“测试”会发起一次轻量检查，默认由 `RATE_LIMIT_SERVICE_TEST_MAX` 限制每个用户每小时最多测试 12 次。
 
 ## 支持格式
 

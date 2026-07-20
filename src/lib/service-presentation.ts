@@ -21,7 +21,7 @@ export function aiServiceStatusClass(status: AiService['status']) {
 }
 
 export function aiServiceIcon(service: AiService) {
-  if (service.id === 'podcast-tts-primary' || service.id === 'podcast-tts-fallback') return Headphones
+  if (service.id.startsWith('podcast-tts-')) return Headphones
   if (service.id === 'listening-tts') return Volume2
   if (service.category === 'ocr') return FileText
   return Brain

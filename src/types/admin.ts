@@ -93,8 +93,15 @@ export type AiService = {
   lastCheck?: AiServiceCheck | null
 }
 
+export type PodcastTtsProviderId = 'dashscope-qwen' | 'official-gemini' | 'gemini-fallback'
+
 export type AiServicesPayload = {
   updatedAt: string
+  podcastTtsPriority: Array<{
+    id: PodcastTtsProviderId
+    label: string
+    configured: boolean
+  }>
   overview: {
     configured: number
     total: number
