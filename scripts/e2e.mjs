@@ -21,6 +21,30 @@ const password = 'reader12345'
 const screenshotDir = path.join(root, 'work-screenshots', 'e2e')
 await fs.mkdir(screenshotDir, { recursive: true })
 
+const dashscopeRequests = []
+const fakeDashscope = createServer(async (req, res) => {
+  if (req.method === 'POST' && req.url === '/api/v1/services/audio/tts/SpeechSynthesizer') {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    dashscopeRequests.push({ authorization: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+    const address = fakeDashscope.address()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ output: { audio: { url: `http://127.0.0.1:${address.port}/audio/test.pcm` } } }))
+    return
+  }
+  if (req.method === 'GET' && req.url === '/audio/test.pcm') {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream' })
+    res.end(Buffer.alloc(48_000))
+    return
+  }
+  res.writeHead(404).end()
+})
+await new Promise((resolve, reject) => {
+  fakeDashscope.once('error', reject)
+  fakeDashscope.listen(0, '127.0.0.1', resolve)
+})
+const dashscopePort = fakeDashscope.address().port
+
 const server = spawn(process.execPath, ['server/index.js', '--prod'], {
   cwd: root,
   env: {
@@ -31,6 +55,10 @@ const server = spawn(process.execPath, ['server/index.js', '--prod'], {
     ALLOW_SIGNUP: 'true',
     INITIAL_ADMIN_EMAIL: email,
     INITIAL_ADMIN_PASSWORD: password,
+    DASHSCOPE_TTS_BASE_URL: `http://127.0.0.1:${dashscopePort}/api/v1`,
+    DASHSCOPE_TTS_API_KEY: 'e2e-dashscope-key',
+    DASHSCOPE_TTS_MODEL: 'qwen-audio-3.0-tts-plus',
+    DASHSCOPE_TTS_VOICE: 'longanlingxin',
     MAX_AUTO_FAILURE_RETRIES: '0',
     PDF_OCR_ENABLED: 'false',
     STORAGE_DRIVER: 'sqlite',
@@ -384,7 +412,7 @@ async function verifyExternalRequestTimeout() {
     const payload = await testResponse.json()
     const elapsedMs = Date.now() - startedAt
     if (!testResponse.ok || payload.check?.status !== 'failed' || !String(payload.check?.message || '').includes('超时')) {
-      throw new Error(`Hanging upstream was not classified as a timeout: ${elapsedMs}ms ${JSON.stringify(payload.check)}`)
+      throw new Error(`Hanging upstream was not classified as a timeout: ${elapsedMs}ms ${JSON.stringify(payload)}\n${output}`)
     }
     if (elapsedMs < 800 || elapsedMs > 5000) throw new Error(`Configured upstream timeout fired at an unexpected time: ${elapsedMs}ms`)
   } finally {
@@ -614,6 +642,25 @@ try {
     throw new Error(`Login did not create a hardened HttpOnly session cookie: ${JSON.stringify(sessionCookie)}`)
   }
   const token = sessionCookie.value
+
+  const podcastTtsTestResponse = await page.request.post(`${baseUrl}/api/ai/services/podcast-tts-primary/test`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const podcastTtsTestPayload = await podcastTtsTestResponse.json()
+  if (!podcastTtsTestResponse.ok() || podcastTtsTestPayload.check?.status !== 'ok') {
+    throw new Error(`DashScope TTS service test failed: ${JSON.stringify(podcastTtsTestPayload)}`)
+  }
+  const dashscopeRequest = dashscopeRequests.at(-1)
+  if (
+    dashscopeRequest?.authorization !== 'Bearer e2e-dashscope-key' ||
+    dashscopeRequest.body?.model !== 'qwen-audio-3.0-tts-plus' ||
+    dashscopeRequest.body?.input?.voice !== 'longanlingxin' ||
+    dashscopeRequest.body?.input?.format !== 'pcm' ||
+    dashscopeRequest.body?.input?.sample_rate !== 24000 ||
+    dashscopeRequest.body?.input?.language_hints?.[0] !== 'en'
+  ) {
+    throw new Error(`DashScope TTS request was malformed: ${JSON.stringify(dashscopeRequest)}`)
+  }
 
   const bearerFallbackResponse = await fetch(`${baseUrl}/api/app`, {
     headers: {
@@ -1373,6 +1420,7 @@ try {
 } finally {
   if (browser) await browser.close()
   server.kill()
+  await new Promise((resolve) => fakeDashscope.close(resolve))
 }
 
 console.log(`E2E passed against ${baseUrl}`)

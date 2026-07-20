@@ -72,8 +72,10 @@ const geminiTtsInputTokenLimit = Math.max(1024, Number(process.env.GEMINI_TTS_IN
 const geminiTtsOutputTokenLimit = Math.max(1024, Number(process.env.GEMINI_TTS_OUTPUT_TOKEN_LIMIT || 16384))
 const defaultPodcastTtsChunkTokens = Math.min(5500, Math.max(512, geminiTtsInputTokenLimit - 512))
 const podcastTtsChunkTokens = Math.max(512, Math.min(geminiTtsInputTokenLimit - 256, Number(process.env.PODCAST_TTS_CHUNK_TOKENS || defaultPodcastTtsChunkTokens)))
-const podcastTtsChunkChars = Math.min(20_000, Math.max(1200, Number(process.env.PODCAST_TTS_CHUNK_CHARS || 8000)))
+const podcastTtsChunkChars = Math.min(20_000, Math.max(1200, Number(process.env.PODCAST_TTS_CHUNK_CHARS || 2800)))
 const podcastTtsConcurrency = Number(process.env.PODCAST_TTS_CONCURRENCY || 2)
+const dashscopeTtsVoices = new Set(['longanlingxin', 'longanlufeng'])
+const legacyPodcastVoices = new Set(['Kore', 'Puck', 'Charon', 'Aoede'])
 const podcastAudioFormat = String(process.env.PODCAST_AUDIO_FORMAT || 'mp3').toLowerCase()
 const podcastMp3Kbps = Number(process.env.PODCAST_MP3_KBPS || 64)
 const podcastScriptSourceChunkWords = Number(process.env.PODCAST_SCRIPT_SOURCE_CHUNK_WORDS || 2600)
@@ -553,8 +555,18 @@ function shouldRateLimitSpeech() {
 function shouldRateLimitPodcast() {
   return (
     (process.env.AI_PROVIDER || 'auto') !== 'mock' &&
-    Boolean(process.env.OPENAI_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY)
+    Boolean(process.env.OPENAI_API_KEY || process.env.DASHSCOPE_TTS_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY)
   )
+}
+
+function defaultPodcastVoice() {
+  const configured = String(process.env.DASHSCOPE_TTS_VOICE || '').trim()
+  return dashscopeTtsVoices.has(configured) ? configured : 'longanlingxin'
+}
+
+function normalizePodcastVoice(value) {
+  const voice = String(value || '').trim()
+  return dashscopeTtsVoices.has(voice) ? voice : defaultPodcastVoice()
 }
 
 function canCreateUser(inviteCode) {
@@ -756,7 +768,7 @@ function userSettings(db, userId) {
       focusStudyMode: true,
       keepSourceFiles: true,
       podcastLexile: podcastLexileDefault,
-      podcastVoice: process.env.GEMINI_TTS_VOICE || 'Kore',
+      podcastVoice: defaultPodcastVoice(),
       microPracticeType: 'random',
       microPracticeTopic: 'book',
       microPracticeDifficulty: 'A2+',
@@ -768,7 +780,8 @@ function userSettings(db, userId) {
   }
   if (settings.focusStudyMode === undefined) settings.focusStudyMode = true
   if (!settings.podcastLexile) settings.podcastLexile = podcastLexileDefault
-  if (!settings.podcastVoice) settings.podcastVoice = process.env.GEMINI_TTS_VOICE || 'Kore'
+  if (!settings.podcastVoice || legacyPodcastVoices.has(settings.podcastVoice)) settings.podcastVoice = defaultPodcastVoice()
+  settings.podcastVoice = normalizePodcastVoice(settings.podcastVoice)
   if (!settings.microPracticeType) settings.microPracticeType = 'random'
   if (!settings.microPracticeTopic) settings.microPracticeTopic = 'book'
   if (!settings.microPracticeDifficulty) settings.microPracticeDifficulty = settings.readingLevel || 'A2+'
@@ -2756,6 +2769,75 @@ function serviceEndpointHost(baseUrl) {
   }
 }
 
+function dashscopeTtsProvider() {
+  const apiKey = String(process.env.DASHSCOPE_TTS_API_KEY || '').trim()
+  if (!apiKey) return null
+  return {
+    name: 'dashscope-qwen',
+    label: 'DashScope Qwen TTS',
+    baseUrl: process.env.DASHSCOPE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1',
+    apiKey,
+    model: process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus',
+  }
+}
+
+function dashscopeTtsApiUrl(baseUrl) {
+  const normalized = String(baseUrl || '').replace(/\/+$/, '')
+  return `${normalized}/services/audio/tts/SpeechSynthesizer`
+}
+
+function dashscopeAudioUrl(value) {
+  const url = new URL(String(value || ''))
+  if (url.protocol === 'http:' && !['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) url.protocol = 'https:'
+  return url.toString()
+}
+
+async function requestDashscopeTtsChunk(provider, text, voiceName) {
+  const voice = normalizePodcastVoice(voiceName)
+  const language = String(process.env.DASHSCOPE_TTS_LANGUAGE || 'en').trim()
+  const instruction =
+    process.env.DASHSCOPE_TTS_INSTRUCTION ||
+    'Warm, calm educational podcast voice; natural pace, clear articulation, brief pauses; read exactly as written.'
+  const response = await fetchTtsService(dashscopeTtsApiUrl(provider.baseUrl), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${provider.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      input: {
+        text,
+        voice,
+        format: 'pcm',
+        sample_rate: 24000,
+        instruction,
+        ...(language ? { language_hints: [language] } : {}),
+      },
+    }),
+  })
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`${provider.label} 失败：${response.status} ${body.slice(0, 200)}`)
+  }
+  const data = await response.json()
+  const rawAudioUrl = String(data?.output?.audio?.url || '').trim()
+  if (!rawAudioUrl) throw new Error(`${provider.label} 未返回音频地址`)
+  const audioUrl = dashscopeAudioUrl(rawAudioUrl)
+  const audioResponse = await fetchTtsService(audioUrl, { headers: { Accept: 'application/octet-stream' } })
+  if (!audioResponse.ok) throw new Error(`${provider.label} 音频下载失败：${audioResponse.status}`)
+  const pcm = Buffer.from(await audioResponse.arrayBuffer())
+  if (pcm.length < 600 || pcm.length % 2 !== 0) throw new Error(`${provider.label} 返回的 PCM 音频无效`)
+  return {
+    pcm,
+    provider: provider.label,
+    model: provider.model,
+    promptProfile: 'qwen-podcast-natural',
+    mimeType: audioResponse.headers.get('content-type') || 'audio/L16; rate=24000; channels=1',
+    voice,
+  }
+}
+
 function geminiTtsPrimaryProviders() {
   const officialKeys = parseApiKeyList(process.env.GEMINI_TTS_OFFICIAL_API_KEY)
   const officialBaseUrl = process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com'
@@ -2806,6 +2888,13 @@ function geminiTtsProviders(options = {}) {
   return providers.filter((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= now)
 }
 
+function podcastTtsProviders(options = {}) {
+  const qwen = dashscopeTtsProvider()
+  const gemini = geminiTtsProviders(options)
+  if (options.preferFallback) return gemini
+  return qwen ? [qwen, ...gemini] : gemini
+}
+
 async function requestGeminiTtsChunk(provider, text, voiceName) {
   const instruction = podcastTtsInstruction(provider)
   const input = `${instruction}\n\n${text}`
@@ -2847,6 +2936,11 @@ async function requestGeminiTtsChunk(provider, text, voiceName) {
   }
 }
 
+function requestPodcastTtsChunk(provider, text, podcastVoice) {
+  if (provider.name === 'dashscope-qwen') return requestDashscopeTtsChunk(provider, text, podcastVoice)
+  return requestGeminiTtsChunk(provider, text, process.env.GEMINI_TTS_VOICE || 'Kore')
+}
+
 function podcastTtsInstruction(provider) {
   if (provider?.name === 'official-gemini') {
     return (
@@ -2872,31 +2966,31 @@ Do not sound robotic. Do not add extra words.`
   )
 }
 
-async function geminiTtsChunk(text, voiceName, options = {}) {
+async function podcastTtsChunk(text, voiceName, options = {}) {
   const provider = process.env.AI_PROVIDER || 'auto'
   if (provider === 'mock') return { pcm: mockPodcastPcm(text), provider: 'mock', model: 'mock', mimeType: 'audio/l16; rate=24000; channels=1' }
 
-  const providers = geminiTtsProviders(options)
-  if (!providers.length) throw new Error('未配置 Gemini TTS API key')
+  const providers = podcastTtsProviders(options)
+  if (!providers.length) throw new Error('未配置播客 TTS API key')
 
   const errors = []
   for (const item of providers) {
     try {
-      return await requestGeminiTtsChunk(item, text, voiceName)
+      return await requestPodcastTtsChunk(item, text, voiceName)
     } catch (error) {
       const message = error?.message || String(error)
       errors.push(message)
       if (item.official && shouldCooldownOfficialGeminiTts(message)) {
         geminiTtsProviderCooldowns.set(geminiTtsProviderKey(item), Date.now() + 60 * 60 * 1000)
       }
-      console.warn(`Gemini TTS provider failed, trying fallback: ${message}`)
+      console.warn(`Podcast TTS provider failed, trying fallback: ${message}`)
     }
   }
-  throw new Error(`Gemini TTS 全部来源失败：${errors.join(' | ')}`)
+  throw new Error(`播客 TTS 全部来源失败：${errors.join(' | ')}`)
 }
 
 async function synthesizePodcastAudio(podcast, onProgress = async () => undefined, options = {}) {
-  const voice = podcast.audio?.voice || podcast.voice || process.env.GEMINI_TTS_VOICE || 'Kore'
+  const voice = normalizePodcastVoice(podcast.audio?.voice || podcast.voice)
   const chunks = chunkTextForTts(podcast.scriptText || '')
   if (!chunks.length) throw new Error('脚本为空，无法合成')
 
@@ -2912,7 +3006,7 @@ async function synthesizePodcastAudio(podcast, onProgress = async () => undefine
     while (cursor < chunks.length) {
       const index = cursor
       cursor += 1
-      const result = await geminiTtsChunk(chunks[index], voice, options)
+      const result = await podcastTtsChunk(chunks[index], voice, options)
       pcmParts[index] = result.pcm
       if (result.provider) usedProviders.add(result.provider)
       if (result.model) usedModels.add(result.model)
@@ -3020,13 +3114,13 @@ function buildAiServicesPayload(db, userId) {
   const ttsBaseUrl = process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
   const textConfigured = Boolean(process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
   const listeningTtsConfigured = Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY) || process.env.AI_PROVIDER === 'mock'
-  const primaryProviders = geminiTtsPrimaryProviders()
-  const fallbackProvider = geminiTtsFallbackProvider()
-  const primaryConfigured = primaryProviders.length > 0 || process.env.AI_PROVIDER === 'mock'
-  const primaryCooldowns = primaryProviders
-    .map((provider) => geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0)
-    .filter((time) => time > Date.now())
-  const primaryWarning = primaryCooldowns.length > 0 && primaryCooldowns.length >= primaryProviders.length ? '主来源暂时冷却，播客会走兜底来源' : ''
+  const primaryProvider = dashscopeTtsProvider()
+  const fallbackProviders = geminiTtsProviders()
+  const primaryConfigured = Boolean(primaryProvider) || process.env.AI_PROVIDER === 'mock'
+  const fallbackConfigured = fallbackProviders.length > 0 || process.env.AI_PROVIDER === 'mock'
+  const activeFallbackCooldowns = fallbackProviders.filter(
+    (provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) > Date.now()
+  ).length
   const visionConfigured = shouldUseVisionOcr()
   const localOcrConfigured = pdfOcrEnabled
   const services = [
@@ -3061,21 +3155,23 @@ function buildAiServicesPayload(db, userId) {
     {
       id: 'podcast-tts-primary',
       title: '播客 TTS 主来源',
-      role: '播客 MP3 合成，当前优先使用 Yunwu/Gemini 3.1 兼容源',
+      role: '播客 MP3 合成，优先使用 DashScope 长文本语音',
       category: 'audio',
       priority: '第一优先',
       configured: primaryConfigured,
-      status: serviceStatusFrom(primaryConfigured, serviceCheckFor(db, userId, 'podcast-tts-primary'), primaryWarning),
-      provider: geminiPrimaryTtsLabel(process.env.GEMINI_TTS_OFFICIAL_BASE_URL || ''),
-      model: process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview',
-      endpointHost: serviceEndpointHost(process.env.GEMINI_TTS_OFFICIAL_BASE_URL || 'https://generativelanguage.googleapis.com'),
+      status: serviceStatusFrom(primaryConfigured, serviceCheckFor(db, userId, 'podcast-tts-primary')),
+      provider: primaryProvider?.label || 'DashScope Qwen TTS',
+      model: primaryProvider?.model || process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus',
+      endpointHost: serviceEndpointHost(primaryProvider?.baseUrl || process.env.DASHSCOPE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1'),
       details: [
-        `Key 数量：${primaryProviders.length}`,
-        `输入/输出上限：${formatServiceNumber(geminiTtsInputTokenLimit)} / ${formatServiceNumber(geminiTtsOutputTokenLimit)} tokens`,
-        `分块：约 ${formatServiceNumber(podcastTtsChunkTokens)} tokens 或 ${formatServiceNumber(podcastTtsChunkChars)} 字`,
+        `音色：${defaultPodcastVoice()}`,
+        `格式：24kHz 单声道 PCM`,
+        `分块：最多约 ${formatServiceNumber(podcastTtsChunkChars)} 字`,
       ],
-      providers: primaryProviders.map((provider) => publicGeminiProvider(provider, 'primary')),
-      warning: primaryWarning,
+      providers: primaryProvider
+        ? [{ role: 'primary', label: primaryProvider.label, model: primaryProvider.model, endpointHost: serviceEndpointHost(primaryProvider.baseUrl), keyId: '', cooldownUntil: '' }]
+        : [],
+      warning: '',
       lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-primary')),
     },
     {
@@ -3084,13 +3180,13 @@ function buildAiServicesPayload(db, userId) {
       role: '主来源失败时自动接手',
       category: 'audio',
       priority: '备用',
-      configured: Boolean(fallbackProvider),
-      status: serviceStatusFrom(Boolean(fallbackProvider), serviceCheckFor(db, userId, 'podcast-tts-fallback')),
-      provider: fallbackProvider?.label || 'Gemini TTS 兜底',
-      model: fallbackProvider?.model || process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
-      endpointHost: serviceEndpointHost(fallbackProvider?.baseUrl || process.env.GEMINI_TTS_BASE_URL || ''),
+      configured: fallbackConfigured,
+      status: serviceStatusFrom(fallbackConfigured, serviceCheckFor(db, userId, 'podcast-tts-fallback')),
+      provider: fallbackProviders[0]?.label || 'Gemini TTS 兜底',
+      model: fallbackProviders.map((provider) => provider.model).join(' + ') || process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+      endpointHost: serviceEndpointHost(fallbackProviders[0]?.baseUrl || process.env.GEMINI_TTS_BASE_URL || ''),
       details: [`音色：${process.env.GEMINI_TTS_VOICE || 'Kore'}`, `并发：${Math.max(1, Math.min(4, podcastTtsConcurrency))} 块`],
-      providers: fallbackProvider ? [publicGeminiProvider(fallbackProvider, 'fallback')] : [],
+      providers: fallbackProviders.map((provider) => publicGeminiProvider(provider, 'fallback')),
       lastCheck: publicServiceCheck(serviceCheckFor(db, userId, 'podcast-tts-fallback')),
     },
     {
@@ -3130,7 +3226,7 @@ function buildAiServicesPayload(db, userId) {
       configured: configuredCount,
       total: services.length,
       healthy: healthyCount,
-      activeCooldowns: primaryCooldowns.length,
+      activeCooldowns: activeFallbackCooldowns,
       serviceTestLimit: aiRateLimits['service-test'].max,
       serviceTestWindowMinutes: Math.round(aiRateLimits['service-test'].windowMs / 60000),
     },
@@ -3203,12 +3299,12 @@ async function testListeningTtsService() {
 }
 
 async function testPodcastTtsProvider(provider) {
-  if (process.env.AI_PROVIDER === 'mock') return { message: 'Mock 播客 TTS 可用', provider: 'mock', model: 'mock', mimeType: 'audio/l16' }
+  if (process.env.AI_PROVIDER === 'mock' && !provider) return { message: 'Mock 播客 TTS 可用', provider: 'mock', model: 'mock', mimeType: 'audio/l16' }
   if (!provider) throw new Error('未配置播客 TTS 来源')
-  const result = await requestGeminiTtsChunk(
+  const result = await requestPodcastTtsChunk(
     provider,
     'Read this short LinguaShelf podcast voice check in a calm, clear, natural teaching voice.',
-    process.env.GEMINI_TTS_VOICE || 'Kore'
+    defaultPodcastVoice()
   )
   if (result.pcm.length < 600) throw new Error(`${provider.label} 返回的音频过小`)
   return {
@@ -3238,11 +3334,10 @@ async function runAiServiceTest(serviceId) {
   } else if (serviceId === 'listening-tts') {
     result = await testListeningTtsService()
   } else if (serviceId === 'podcast-tts-primary') {
-    const providers = geminiTtsPrimaryProviders()
-    const active = providers.find((provider) => (geminiTtsProviderCooldowns.get(geminiTtsProviderKey(provider)) || 0) <= Date.now())
-    result = await testPodcastTtsProvider(active || providers[0])
+    result = await testPodcastTtsProvider(dashscopeTtsProvider())
   } else if (serviceId === 'podcast-tts-fallback') {
-    result = await testPodcastTtsProvider(geminiTtsFallbackProvider())
+    const providers = geminiTtsProviders({ preferFallback: true })
+    result = await testPodcastTtsProvider(providers[0])
   } else if (serviceId === 'vision-ocr') {
     if (!shouldUseVisionOcr()) throw new Error('未配置视觉 OCR 来源')
     result = {
@@ -6724,8 +6819,8 @@ async function processPodcastJob(jobId) {
       jobId: job.id,
       category: 'audio',
       action: 'generate-podcast-tts',
-      provider: 'Gemini TTS',
-      model: process.env.GEMINI_TTS_OFFICIAL_MODEL || process.env.GEMINI_TTS_MODEL || 'gemini-tts',
+      provider: 'Podcast TTS',
+      model: process.env.DASHSCOPE_TTS_MODEL || process.env.GEMINI_TTS_OFFICIAL_MODEL || process.env.GEMINI_TTS_MODEL || 'podcast-tts',
       inputTokens: estimateTtsInputTokens(podcast.scriptText || ''),
       chunks: chunkTextForTts(podcast.scriptText || '').length,
       success: false,
@@ -6747,7 +6842,7 @@ async function processPodcastJob(jobId) {
     jobId: job.id,
     category: 'audio',
     action: 'generate-podcast-tts',
-    provider: audio.provider || 'Gemini TTS',
+    provider: audio.provider || 'Podcast TTS',
     model: audio.model || '',
     inputTokens: estimateTtsInputTokens(podcast.scriptText || ''),
     audioSeconds: audio.durationSeconds,
@@ -7166,7 +7261,7 @@ async function createApp() {
     settings.readingLevel = normalizeLevel(readingLevels, settings.readingLevel, 'A2+')
     settings.listeningLevel = normalizeLevel(listeningLevels, settings.listeningLevel, 'A2')
     settings.podcastLexile = Math.max(podcastLexileMin, Math.min(podcastLexileMax, Number(settings.podcastLexile || podcastLexileDefault)))
-    settings.podcastVoice = String(settings.podcastVoice || 'Kore').trim() || 'Kore'
+    settings.podcastVoice = normalizePodcastVoice(settings.podcastVoice)
     settings.microPracticeType = normalizeMicroPracticeType(settings.microPracticeType, 'random')
     settings.microPracticeTopic = normalizeMicroPracticeTopic(settings.microPracticeTopic, 'book')
     settings.microPracticeDifficulty = normalizeLevel([...listeningLevels, ...readingLevels], settings.microPracticeDifficulty, settings.readingLevel)
@@ -7201,8 +7296,12 @@ async function createApp() {
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         ttsConfigured: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
         ttsProvider: process.env.OPENAI_TTS_PROVIDER || 'openai-speech',
-        podcastTtsConfigured: Boolean(process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY),
-        podcastTtsPrimary: process.env.GEMINI_TTS_OFFICIAL_API_KEY ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview' : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+        podcastTtsConfigured: Boolean(process.env.DASHSCOPE_TTS_API_KEY || process.env.GEMINI_TTS_OFFICIAL_API_KEY || process.env.GEMINI_TTS_API_KEY),
+        podcastTtsPrimary: process.env.DASHSCOPE_TTS_API_KEY
+          ? process.env.DASHSCOPE_TTS_MODEL || 'qwen-audio-3.0-tts-plus'
+          : process.env.GEMINI_TTS_OFFICIAL_API_KEY
+            ? process.env.GEMINI_TTS_OFFICIAL_MODEL || 'gemini-3.1-flash-tts-preview'
+            : process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts',
         podcastTtsInputTokenLimit: geminiTtsInputTokenLimit,
         podcastTtsOutputTokenLimit: geminiTtsOutputTokenLimit,
         podcastTtsChunkTokens,
@@ -7898,7 +7997,7 @@ async function createApp() {
       sourceText: group.text,
       sourceWordCount: group.words,
       lexile: Math.max(podcastLexileMin, Math.min(podcastLexileMax, Number(settings.podcastLexile || podcastLexileDefault))),
-      voice: String(settings.podcastVoice || process.env.GEMINI_TTS_VOICE || 'Kore'),
+      voice: normalizePodcastVoice(settings.podcastVoice),
       scriptText: null,
       scriptMode: '',
       scriptPartCount: 0,

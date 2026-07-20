@@ -26,6 +26,12 @@ OPENAI_TTS_MODEL=mimo-v2.5-tts
 OPENAI_TTS_VOICES=Mia,Milo
 OPENAI_TTS_BASE_URL=https://api.xiaomimimo.com/v1
 OPENAI_TTS_API_KEY=你的语音 key
+DASHSCOPE_TTS_BASE_URL=https://dashscope.aliyuncs.com/api/v1
+DASHSCOPE_TTS_API_KEY=你的 DashScope key
+DASHSCOPE_TTS_MODEL=qwen-audio-3.0-tts-plus
+DASHSCOPE_TTS_VOICE=longanlingxin
+DASHSCOPE_TTS_LANGUAGE=en
+DASHSCOPE_TTS_INSTRUCTION=Warm, calm educational podcast voice; natural pace, clear articulation, brief pauses; read exactly as written.
 GEMINI_TTS_OFFICIAL_BASE_URL=https://yunwu.ai
 GEMINI_TTS_OFFICIAL_API_KEY=你的 Gemini 3.1 主来源 key，多个 key 用英文逗号分隔
 GEMINI_TTS_OFFICIAL_MODEL=gemini-3.1-flash-tts-preview
@@ -49,7 +55,7 @@ BACKUP_ENCRYPTION_KEY=建议填一段足够长的随机口令
 BACKUP_ENCRYPTION_REQUIRED=true
 ```
 
-`GEMINI_TTS_OFFICIAL_*` 是历史兼容变量名，实际表示“播客 TTS 主来源”。当前推荐填 Yunwu 这类 Gemini 兼容源；无需配置 Google 官方 key。
+播客 TTS 顺序固定为 DashScope Qwen 主来源、Gemini 3.1 兜底、Gemini 2.5 二级兜底。`GEMINI_TTS_OFFICIAL_*` 是历史兼容变量名，可继续指向 Yunwu 这类 Gemini 兼容源；无需配置 Google 官方 key。
 
 生产环境建议保持：
 
@@ -98,7 +104,7 @@ PODCAST_LEXILE_DEFAULT=900
 PODCAST_SOURCE_WORDS_PER_EPISODE=2200
 MAX_PODCAST_EPISODES=12
 PODCAST_TTS_CHUNK_TOKENS=5500
-PODCAST_TTS_CHUNK_CHARS=8000
+PODCAST_TTS_CHUNK_CHARS=2800
 PODCAST_TTS_CONCURRENCY=2
 PODCAST_AUDIO_FORMAT=mp3
 PODCAST_MP3_KBPS=64

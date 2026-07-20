@@ -56,9 +56,16 @@ function podcastKindLabel(kind?: string) {
 
 function podcastPromptProfileLabel(profile?: string) {
   if (!profile) return ''
+  if (profile.includes('qwen-podcast-natural')) return 'Qwen 自然播客'
   if (profile.includes('gemini-3.1-podcast-director')) return '3.1 播客导演'
   if (profile.includes('gemini-tts-fallback-clear')) return '兜底清晰朗读'
   return profile
+}
+
+function podcastVoiceLabel(voice?: string) {
+  if (voice === 'longanlingxin') return '温暖知性'
+  if (voice === 'longanlufeng') return '明亮开朗'
+  return voice || '温暖知性'
 }
 
 function sortPodcastList(items: Podcast[]) {
@@ -795,7 +802,7 @@ export function BookPage({
                     </div>
                     <div className="podcast-meta">
                       <span>{podcastKindLabel(podcast.kind)} · {formatNumber(podcast.sourceWordCount)} 源文本词数</span>
-                      <span>Lexile {podcast.lexile}L · 声音 {podcast.audio?.voice || podcast.voice || settings.podcastVoice}</span>
+                      <span>Lexile {podcast.lexile}L · 声音 {podcastVoiceLabel(podcast.audio?.voice || podcast.voice || settings.podcastVoice)}</span>
                       {podcast.audio && (
                         <span>
                           {String(podcast.audio.format || 'audio').toUpperCase()} · {formatDuration(podcast.audio.durationSeconds)} · {formatBytes(podcast.audio.byteLength)} · {podcast.audio.chunkCount} 块

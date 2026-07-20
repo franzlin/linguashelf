@@ -14,6 +14,11 @@ import { formatBytes, formatDateTime, formatNumber } from '../lib/format'
 import type { SecurityStatus } from '../types/admin'
 import type { UserSettings } from '../types/domain'
 
+const podcastVoiceOptions = [
+  { value: 'longanlingxin', label: '温暖知性' },
+  { value: 'longanlufeng', label: '明亮开朗' },
+] as const
+
 export function SettingsPage({
   settings,
   token,
@@ -111,10 +116,11 @@ export function SettingsPage({
       </SettingGroup>
 
       <SettingGroup title="播客音色">
-        <Segmented
-          options={['Kore', 'Puck', 'Charon', 'Aoede']}
-          value={draft.podcastVoice || 'Kore'}
+        <OptionSegment
+          options={[...podcastVoiceOptions]}
+          value={draft.podcastVoice === 'longanlufeng' ? 'longanlufeng' : 'longanlingxin'}
           onChange={(podcastVoice) => setDraft({ ...draft, podcastVoice })}
+          ariaLabel="播客音色"
         />
       </SettingGroup>
 
