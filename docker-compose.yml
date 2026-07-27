@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_REVISION: ${GIT_REVISION:-unknown}
     restart: unless-stopped
     env_file:
       - .env

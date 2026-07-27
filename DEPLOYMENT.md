@@ -118,8 +118,10 @@ BACKUP_ENCRYPTION_REQUIRED=true
 ## 3. Docker Compose 启动
 
 ```bash
-docker compose up -d --build
+GIT_REVISION=$(git rev-parse --short=7 HEAD) docker compose up -d --build
 ```
+
+`GIT_REVISION` 会注入镜像并由 `/api/health` 的 `revision` 字段返回，用于线上核对运行版本；不传时该字段回退为容器内 `.deployed-revision` 文件内容或 `unknown`。
 
 查看状态：
 

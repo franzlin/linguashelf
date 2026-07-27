@@ -11,8 +11,11 @@ RUN npm run build
 
 FROM node:22-slim AS runtime
 
+ARG GIT_REVISION=unknown
+
 WORKDIR /app
 ENV NODE_ENV=production
+ENV GIT_REVISION=$GIT_REVISION
 ENV PORT=5173
 ENV STORAGE_DRIVER=sqlite
 ENV DATA_DIR=/app/data

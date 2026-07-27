@@ -95,8 +95,45 @@ export type AiService = {
 
 export type PodcastTtsProviderId = 'dashscope-qwen' | 'official-gemini' | 'gemini-fallback'
 
+export type AiCapabilityId = 'text' | 'listeningTts' | 'podcastQwen' | 'podcastGeminiOfficial' | 'podcastGeminiFallback' | 'ocr'
+
+// One customizable capability as reported by the admin API. `effective` is what
+// the server will actually use after merging stored config over the
+// environment; the raw API key is never sent, only a mask.
+export type AiCapabilityConfig = {
+  baseUrl?: string
+  model?: string
+  apiStyle?: string
+  jsonMode?: string
+  reasoningEffort?: string
+  verbosity?: string
+  provider?: string
+  voice?: string
+  instructions?: string
+  apiKeyMask: string
+  hasCustomKey: boolean
+  effective: {
+    baseUrl?: string
+    model?: string
+    apiStyle?: string
+    jsonMode?: string
+    reasoningEffort?: string
+    verbosity?: string
+    provider?: string
+    voice?: string
+    instructions?: string
+    configured: boolean
+    source: 'env' | 'custom'
+  }
+}
+
+export type AiCustomConfig = Record<AiCapabilityId, AiCapabilityConfig>
+
+export type AiCapabilityPatch = Partial<Record<AiCapabilityId, Record<string, string | null>>>
+
 export type AiServicesPayload = {
   updatedAt: string
+  customConfig?: AiCustomConfig
   podcastTtsPriority: Array<{
     id: PodcastTtsProviderId
     label: string

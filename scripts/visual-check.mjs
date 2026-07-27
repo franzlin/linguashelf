@@ -73,6 +73,10 @@ try {
     await page.screenshot({ path: path.join(outputDir, 'login-desktop.png'), fullPage: true })
     await page.setViewportSize({ width: 390, height: 844 })
     await page.screenshot({ path: path.join(outputDir, 'login-mobile-390.png'), fullPage: true })
+    const loginButtonHeight = await page
+      .getByRole('button', { name: '登录 / 创建账号' })
+      .evaluate((element) => element.getBoundingClientRect().height)
+    if (loginButtonHeight < 44) throw new Error(`移动登录按钮触控高度不足：${loginButtonHeight}px`)
     await page.setViewportSize({ width: 1440, height: 1000 })
     await page.locator('input[type="email"]').fill(email)
     await page.locator('input[type="password"]').fill(password)
@@ -99,6 +103,46 @@ try {
     const contentLength = await page.locator('.workspace-content').evaluate((element) => element.textContent?.trim().length || 0)
     if (contentLength < 8) throw new Error(`页面 ${route} 未渲染有效内容`)
   }
+
+  await page.locator('[data-nav-view="services"]').click()
+  await page.getByRole('button', { name: /自定义 API/ }).click()
+  const textConfigToggle = page.locator('.ai-config-card').first().locator('.ai-config-summary')
+  await textConfigToggle.click()
+  await page.locator('#text-baseUrl').waitFor({ state: 'visible' })
+  const configAudit = await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('.ai-config-form input, .ai-config-form select, .ai-config-form textarea')]
+    const keyInput = document.querySelector('#text-apiKey')
+    return {
+      fieldCount: inputs.length,
+      smallestField: Math.min(...inputs.map((element) => element.getBoundingClientRect().height)),
+      keyInputType: keyInput?.getAttribute('type') || '',
+      keyInputValue: keyInput?.value ?? 'missing',
+    }
+  })
+  if (configAudit.fieldCount < 6) throw new Error(`自定义 API 表单字段不足：${configAudit.fieldCount}`)
+  if (configAudit.smallestField < 44) throw new Error(`自定义 API 表单控件高度不足：${configAudit.smallestField}px`)
+  if (configAudit.keyInputType !== 'password') throw new Error('API key 输入框必须是 password 类型')
+  if (configAudit.keyInputValue !== '') throw new Error('API key 输入框不能预填任何值')
+  await page.screenshot({ path: path.join(outputDir, 'ai-config-desktop.png'), fullPage: true })
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(160)
+  const configMobileAudit = await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('.ai-config-form input, .ai-config-form select, .ai-config-form textarea')]
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      smallestField: Math.min(...inputs.map((element) => element.getBoundingClientRect().height)),
+      widestField: Math.max(...inputs.map((element) => element.getBoundingClientRect().width)),
+    }
+  })
+  if (configMobileAudit.scrollWidth > configMobileAudit.viewportWidth + 1) {
+    throw new Error(`自定义 API 面板在 390px 横向溢出：${configMobileAudit.scrollWidth}px > ${configMobileAudit.viewportWidth}px`)
+  }
+  if (configMobileAudit.smallestField < 44) throw new Error(`390px 自定义 API 控件高度不足：${configMobileAudit.smallestField}px`)
+  await page.screenshot({ path: path.join(outputDir, 'ai-config-mobile-390.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.waitForTimeout(120)
 
   await page.locator('[data-nav-view="library"]').click()
   await page.locator('.upload-dropzone').waitFor({ state: 'visible' })

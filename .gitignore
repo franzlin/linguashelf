@@ -18,6 +18,9 @@ sample-*.wav
 sample-tts.mjs
 outputs
 .env
+
+# Model comparison config — may contain API keys
+scripts/model-candidates.json
 .env.*
 !.env.example
 *.local

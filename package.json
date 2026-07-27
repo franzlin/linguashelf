@@ -8,13 +8,23 @@
     "build": "tsc && vite build",
     "start": "node server/index.js --prod",
     "check": "tsc --noEmit",
+    "test:unit": "node scripts/test-units.mjs",
+    "test:server": "node scripts/test-server-regression.mjs",
+    "test:ai": "node scripts/test-ai-config.mjs && node scripts/test-ai-config-form.mjs && node scripts/test-custom-ai-endpoint.mjs",
+    "analyze:server": "node scripts/analyze-server-deps.mjs",
+    "check:symbols": "node scripts/check-server-symbols.mjs",
     "e2e": "npm run build && node scripts/e2e.mjs",
     "visual": "node scripts/visual-check.mjs",
     "smoke": "node scripts/smoke.mjs",
     "predeploy": "node scripts/predeploy-check.mjs",
     "backup": "node scripts/backup.mjs",
     "backup:drill": "node scripts/backup-drill.mjs",
-    "restore": "node scripts/restore.mjs"
+    "restore": "node scripts/restore.mjs",
+    "verify": "npm run check && npm run check:symbols && npm run check:imports && npm run check:routes && npm run test:unit && npm run test:ai && npm run test:server",
+    "check:imports": "node scripts/check-server-imports.mjs",
+    "check:routes": "node scripts/check-routes.mjs",
+    "measure:storage": "node scripts/measure-storage.mjs",
+    "compare:models": "node scripts/compare-models.mjs"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
@@ -36,5 +46,6 @@
     "pdf-parse": "^2.4.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
-  }
+  },
+  "overrides": {}
 }

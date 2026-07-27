@@ -662,6 +662,43 @@ try {
     throw new Error(`DashScope TTS request was malformed: ${JSON.stringify(dashscopeRequest)}`)
   }
 
+  // Web-managed custom endpoints: a saved key must round-trip as a mask only,
+  // and a partial save must not disturb the other stored fields.
+  const configSave = await page.request.patch(`${baseUrl}/api/ai/services/config`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: { baseUrl: 'https://e2e-custom.test', apiKey: 'e2e-custom-key-should-not-leak', model: 'e2e-custom-model' } },
+  })
+  const configPayload = await configSave.json()
+  if (!configSave.ok() || configPayload.customConfig?.text?.effective?.baseUrl !== 'https://e2e-custom.test/v1') {
+    throw new Error(`Custom text endpoint was not applied: ${JSON.stringify(configPayload.customConfig?.text)}`)
+  }
+  if (JSON.stringify(configPayload).includes('e2e-custom-key-should-not-leak')) {
+    throw new Error('Custom API key leaked into the admin services payload')
+  }
+  if (configPayload.customConfig?.text?.hasCustomKey !== true) throw new Error('Custom API key was not stored')
+
+  const partialSave = await page.request.patch(`${baseUrl}/api/ai/services/config`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: { model: 'e2e-second-model' } },
+  })
+  const partialPayload = await partialSave.json()
+  if (
+    partialPayload.customConfig?.text?.effective?.model !== 'e2e-second-model' ||
+    partialPayload.customConfig?.text?.effective?.baseUrl !== 'https://e2e-custom.test/v1' ||
+    partialPayload.customConfig?.text?.hasCustomKey !== true
+  ) {
+    throw new Error(`Partial config save clobbered other fields: ${JSON.stringify(partialPayload.customConfig?.text)}`)
+  }
+
+  const clearedSave = await page.request.patch(`${baseUrl}/api/ai/services/config`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { text: { baseUrl: '', model: '', apiKey: null } },
+  })
+  const clearedPayload = await clearedSave.json()
+  if (clearedPayload.customConfig?.text?.effective?.source !== 'env' || clearedPayload.customConfig?.text?.hasCustomKey !== false) {
+    throw new Error(`Clearing the custom text config did not restore env: ${JSON.stringify(clearedPayload.customConfig?.text)}`)
+  }
+
   const reorderedTtsPriority = ['gemini-fallback', 'official-gemini', 'dashscope-qwen']
   const priorityResponse = await page.request.patch(`${baseUrl}/api/ai/services/podcast-tts-priority`, {
     headers: { Authorization: `Bearer ${token}` },

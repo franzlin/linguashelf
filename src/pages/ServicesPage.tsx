@@ -5,7 +5,8 @@ import { Stat } from '../components/ui/Metrics'
 import { requestJson } from '../lib/api'
 import { formatDateTime } from '../lib/format'
 import { aiServiceIcon, aiServiceStatusClass, aiServiceStatusLabel } from '../lib/service-presentation'
-import type { AiService, AiServiceCheck, AiServicesPayload, PodcastTtsProviderId } from '../types/admin'
+import { AiServiceConfigPanel } from '../components/AiServiceConfig'
+import type { AiCapabilityId, AiService, AiServiceCheck, AiServicesPayload, PodcastTtsProviderId } from '../types/admin'
 
 export function ServicesPage({ token, onError }: { token: string; onError: (message: string) => void }) {
   const [payload, setPayload] = useState<AiServicesPayload | null>(null)
@@ -33,6 +34,22 @@ export function ServicesPage({ token, onError }: { token: string; onError: (mess
       setPayload(result)
     } catch (err) {
       onError(err instanceof Error ? err.message : '服务测试失败')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function saveCapabilityConfig(capability: AiCapabilityId, patch: Record<string, string | null>) {
+    setBusyId(`config-${capability}`)
+    try {
+      const result = await requestJson<AiServicesPayload>('/api/ai/services/config', token, {
+        method: 'PATCH',
+        body: JSON.stringify({ [capability]: patch }),
+      })
+      setPayload(result)
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'AI 服务配置保存失败')
+      throw err
     } finally {
       setBusyId('')
     }
@@ -69,7 +86,7 @@ export function ServicesPage({ token, onError }: { token: string; onError: (mess
       <div className="section-head">
         <div>
           <h1>AI 服务</h1>
-          <p>查看可排序的播客语音来源和最近检查结果，不显示任何密钥。</p>
+          <p>配置每类能力使用的接口、模型和 key，调整播客语音优先级；页面永远不会显示已保存的密钥。</p>
         </div>
         <button className="ghost-button" type="button" onClick={() => loadServices().catch(() => undefined)} disabled={loading}>
           {loading ? <Loader2 className="spin" size={18} /> : <RotateCcw size={18} />}
@@ -85,6 +102,8 @@ export function ServicesPage({ token, onError }: { token: string; onError: (mess
           <Stat label="测试额度" value={`${payload.overview.serviceTestLimit}/${payload.overview.serviceTestWindowMinutes} 分钟`} />
         </div>
       )}
+
+      {payload && <AiServiceConfigPanel config={payload.customConfig} busyId={busyId} onSave={saveCapabilityConfig} />}
 
       {loading && !payload ? (
         <div className="empty-state">
