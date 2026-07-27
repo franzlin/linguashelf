@@ -297,6 +297,24 @@ try {
   const artifactTitles = pdfUnits.filter((unit) => /WORKINGFOLDER|ITOOLS|\.3D/i.test(`${unit.title} ${unit.sourceLocation}`))
   check('typesetting-tool paths are filtered out of titles', artifactTitles.length === 0, artifactTitles.map((u) => u.title).join(' | '))
 
+  // The running head is printed on every page, so if it survived cleaning it
+  // would appear repeatedly inside each unit's source excerpt.
+  if (process.env.DUMP_SHAPES) console.log('PDFUNIT0:', JSON.stringify(pdfUnits[0]).slice(0, 600))
+  // The fixture prints an ALL-CAPS running head on every page. If it is mistaken
+  // for a chapter heading, every page starts a new section — page-based
+  // splitting, which the product forbids — and each section inherits the running
+  // head as its title. Both symptoms are asserted here.
+  const namedAfterRunningHead = pdfUnits.filter((unit) => /a history of public finance/i.test(`${unit.title} ${unit.sourceLocation}`))
+  check(
+    'no unit is titled after the page running head',
+    namedAfterRunningHead.length === 0,
+    namedAfterRunningHead.map((unit) => unit.title).join(' | '),
+  )
+  check(
+    'a 10-page PDF does not produce one unit per page',
+    pdfUnits.length < 10,
+    `${pdfUnits.length} units from 10 pages suggests page-based splitting`,
+  )
   check('PDF units reference page ranges for provenance', pdfUnits.some((unit) => /\d/.test(unit.sourceLocation || '')))
 
   // --- generation ---------------------------------------------------------

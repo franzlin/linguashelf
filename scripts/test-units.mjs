@@ -218,8 +218,16 @@ test('cleanPdfPages strips typesetting paths, page numbers and running heads', (
   assert.ok(cleaned.every((page) => page.wordCount > 0))
 })
 
-// Repeated-line removal must not start eating real chapter titles, which is why
-// headings are exempt from the ordinary running-head rule.
+test('an ALL-CAPS running head is removed even though it looks like a heading', () => {
+  const cleaned = cleanPdfPages(pdfPages('A HISTORY OF PUBLIC FINANCE'))
+  const allText = cleaned.map((page) => page.text).join('\n')
+  assert.ok(!/a history of public finance/i.test(allText), 'an ALL-CAPS running head survived cleaning')
+  assert.ok(/Merchants needed credit/.test(allText), 'body text was removed along with it')
+})
+
+// The guard cases for the rule above. Removing running heads must not start
+// eating real chapter titles, which is the whole reason headings were exempt
+// from repeated-line removal in the first place.
 test('a chapter title that appears once is preserved', () => {
   const pages = Array.from({ length: 8 }, (_, index) => ({
     num: index + 1,

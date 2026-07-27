@@ -69,22 +69,66 @@ export function isGenericPdfSectionTitle(title) {
   return /^PDF 区块 \d+$/i.test(String(title || '').trim())
 }
 
+/**
+ * Finds lines that repeat across pages and are therefore page furniture rather
+ * than body text.
+ *
+ * Heading-shaped lines are counted separately. A real chapter title appears on
+ * one page; a line that *looks* like a heading but is printed on most pages is a
+ * running head (a book title in small caps, for example). Without this
+ * distinction an ALL-CAPS running head matches the "looks like a chapter
+ * heading" rule, escapes removal, and ends up inside every unit's source text.
+ *
+ * Running heads need a clearly higher bar than ordinary repeated lines, plus a
+ * minimum document length, so that a short excerpt whose single chapter title
+ * happens to span two of three pages is never mistaken for one.
+ */
 export function collectRepeatedPdfLines(pages) {
-  const counts = new Map()
-  for (const page of pages) {
-    const seen = new Set()
+  const bodyCounts = new Map()
+  const headingSpans = new Map()
+
+  pages.forEach((page, pageIndex) => {
+    const seenBody = new Set()
+    const seenHeadings = new Set()
     for (const line of page.lines) {
-      if (isLikelyPageNumber(line) || isPdfProductionArtifactLine(line) || isPdfChapterHeading(line)) continue
+      if (isLikelyPageNumber(line) || isPdfProductionArtifactLine(line)) continue
       const fingerprint = pdfLineFingerprint(line)
       if (!fingerprint || fingerprint.length < 4 || fingerprint.length > 90) continue
       if (wordCount(fingerprint) > 12) continue
-      seen.add(fingerprint)
+      if (isPdfChapterHeading(line)) seenHeadings.add(fingerprint)
+      else seenBody.add(fingerprint)
     }
-    for (const fingerprint of seen) counts.set(fingerprint, (counts.get(fingerprint) || 0) + 1)
-  }
+    for (const fingerprint of seenBody) bodyCounts.set(fingerprint, (bodyCounts.get(fingerprint) || 0) + 1)
+    for (const fingerprint of seenHeadings) {
+      const span = headingSpans.get(fingerprint) || { count: 0, first: pageIndex, last: pageIndex }
+      span.count += 1
+      span.last = pageIndex
+      headingSpans.set(fingerprint, span)
+    }
+  })
 
-  const threshold = Math.max(3, Math.ceil(pages.length * 0.25))
-  return new Set([...counts.entries()].filter(([, count]) => count >= threshold).map(([line]) => line))
+  const bodyThreshold = Math.max(3, Math.ceil(pages.length * 0.25))
+  const repeated = new Set(
+    [...bodyCounts.entries()].filter(([, count]) => count >= bodyThreshold).map(([fingerprint]) => fingerprint),
+  )
+
+  // A running head is defined by two things at once: it is printed on most pages,
+  // and it runs from near the start of the document to near the end. Requiring
+  // both is what separates a book title from a chapter title that happens to be
+  // repeated as a running head within its own chapter — the latter is dense but
+  // confined to one stretch of pages, so it stays a heading.
+  const frequencyThreshold = Math.max(4, Math.ceil(pages.length * 0.6))
+  const spanThreshold = Math.ceil(pages.length * 0.8)
+  const runningHeads =
+    pages.length >= 5
+      ? new Set(
+          [...headingSpans.entries()]
+            .filter(([, span]) => span.count >= frequencyThreshold && span.last - span.first + 1 >= spanThreshold)
+            .map(([fingerprint]) => fingerprint),
+        )
+      : new Set()
+
+  return { repeated, runningHeads }
 }
 
 export function cleanPdfPages(resultPages) {
@@ -97,12 +141,15 @@ export function cleanPdfPages(resultPages) {
       .map(normalizePdfLine)
       .filter(Boolean),
   }))
-  const repeated = collectRepeatedPdfLines(pages)
+  const { repeated, runningHeads } = collectRepeatedPdfLines(pages)
 
   return pages.map((page) => {
     const lines = page.lines.filter((line) => {
       if (isLikelyPageNumber(line) || isPdfProductionArtifactLine(line)) return false
       const fingerprint = pdfLineFingerprint(line)
+      // Chapter headings are preserved, unless the same "heading" is printed on
+      // most pages — then it is a running head and belongs to the furniture.
+      if (runningHeads.has(fingerprint)) return false
       if (repeated.has(fingerprint) && !isPdfChapterHeading(line)) return false
       return true
     })
