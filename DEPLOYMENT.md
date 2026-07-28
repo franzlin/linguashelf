@@ -1,14 +1,29 @@
 # LinguaShelf 部署指南
 
-推荐方式是 Docker Compose + Caddy。Caddy 会自动申请和续期 HTTPS 证书，应用数据保存在 Docker volume 中。
+生产环境采用“应用 Compose + 独立全局边缘网关”的结构。LinguaShelf 的
+`docker-compose.yml` **只管理 `app`**；整台 VPS 的 Caddy、证书和其他站点路由由
+`/opt/caddy` 独立管理。应用数据保存在 Docker volume 中。
+
+禁止在 `/opt/linguashelf` 运行无服务名的 `docker compose up -d --build`。生产发布只能使用：
+
+```bash
+GIT_REVISION=<已提交的7至40位十六进制修订号> /opt/caddy/scripts/deploy-linguashelf-app.sh
+```
+
+该脚本和 Docker 镜像构建都会拒绝缺失或格式错误的 `GIT_REVISION`。脚本在发布前后
+锁定全局 Caddy 与 CLIProxyAPI 的容器 ID、配置哈希和路由状态，只执行
+`docker compose build app` 与 `docker compose up -d --no-deps app`。应用健康接口返回
+同一 revision 且全站验收通过后，脚本才会原子更新
+`/opt/linguashelf/.deployed-revision`。`docker compose ps/logs/exec` 等非构建运维命令
+不需要设置 revision。
 
 ## 1. 准备服务器
 
 服务器需要：
 
 - Docker 和 Docker Compose
-- 一个已经解析到服务器公网 IP 的域名
-- 80 和 443 端口开放
+- 已由独立边缘网关接管的 `edge-gateway` external Docker 网络
+- `/opt/caddy` 中已经验证并加固的全局 Caddy 配置
 
 Docker 镜像会安装 PDF OCR 所需的 `poppler-utils` 和 `tesseract-ocr`。如果选择非 Docker 部署，需要在宿主机额外安装这两个组件。
 
@@ -17,7 +32,6 @@ Docker 镜像会安装 PDF OCR 所需的 `poppler-utils` 和 `tesseract-ocr`。�
 复制 `.env.example` 为 `.env`，至少修改：
 
 ```bash
-APP_DOMAIN=reader.example.com
 OPENAI_API_KEY=你的文本生成 key
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-5.5
@@ -115,13 +129,24 @@ QUALITY_AUDIT_MODE=auto
 BACKUP_ENCRYPTION_REQUIRED=true
 ```
 
-## 3. Docker Compose 启动
+## 3. 生产发布
 
 ```bash
-GIT_REVISION=$(git rev-parse --short=7 HEAD) docker compose up -d --build
+GIT_REVISION=<已提交的7至40位十六进制修订号> /opt/caddy/scripts/deploy-linguashelf-app.sh
 ```
 
-`GIT_REVISION` 会注入镜像并由 `/api/health` 的 `revision` 字段返回，用于线上核对运行版本；不传时该字段回退为容器内 `.deployed-revision` 文件内容或 `unknown`。
+发布前应把已提交代码同步到 `/opt/linguashelf`。`GIT_REVISION` 必须与该批代码的提交号
+一致；缺失、含非十六进制字符或长度不在 7 至 40 位之间时，脚本和镜像构建都会拒绝发布。
+该值会注入镜像并由 `/api/health` 的 `revision` 字段返回。脚本只在应用健康、revision
+一致且所有生产站点验收通过后更新 `/opt/linguashelf/.deployed-revision`。
+
+生产 LinguaShelf Compose 必须满足：
+
+- `docker compose config --services` 只输出 `app`
+- `app` 只加入 external `edge-gateway` 网络，并保留网络别名 `app`
+- 不声明 Caddy，不发布 80/443，不拥有证书卷或全局路由文件
+
+全局入口的配置、校验与恢复流程位于 `/opt/caddy`，不属于 LinguaShelf 应用发布范围。
 
 查看状态：
 
@@ -221,7 +246,7 @@ docker compose stop app
 ```bash
 docker compose cp ./linguashelf-xxxx.zip.enc app:/app/backups/linguashelf-xxxx.zip.enc
 docker compose run --rm app npm run restore -- /app/backups/linguashelf-xxxx.zip.enc
-docker compose up -d
+docker compose up -d --no-deps app
 ```
 
 恢复脚本会先把备份解压到同级暂存目录，校验 SQLite 完整性或 JSON 结构后，再原子切换正式数据目录并保留旧目录。解压或校验失败不会移动当前生产数据；加密备份需要容器环境里存在同一个 `BACKUP_ENCRYPTION_KEY`。

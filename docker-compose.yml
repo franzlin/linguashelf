@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        GIT_REVISION: ${GIT_REVISION:-unknown}
+        GIT_REVISION: ${GIT_REVISION:-}
     restart: unless-stopped
     env_file:
       - .env
@@ -18,24 +18,16 @@ services:
       - linguashelf-backups:/app/backups
     expose:
       - "5173"
+    networks:
+      edge-gateway:
+        aliases:
+          - app
 
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    depends_on:
-      - app
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+networks:
+  edge-gateway:
+    external: true
+    name: edge-gateway
 
 volumes:
   linguashelf-data:
   linguashelf-backups:
-  caddy-data:
-  caddy-config:

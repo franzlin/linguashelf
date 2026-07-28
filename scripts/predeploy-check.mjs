@@ -8,6 +8,7 @@ const baseUrl = process.env.BASE_URL || ''
 const results = []
 
 await checkRequiredFiles()
+await checkComposeBoundary()
 await checkDockerignore()
 await checkPackageScripts()
 await checkEnvExample()
@@ -36,7 +37,6 @@ async function checkRequiredFiles() {
     'public/sw.js',
     'Dockerfile',
     'docker-compose.yml',
-    'deploy/Caddyfile',
     'DEPLOYMENT.md',
     'README.md',
     '.env.example',
@@ -45,6 +45,41 @@ async function checkRequiredFiles() {
     const ok = await exists(path.join(root, file))
     record(ok ? 'pass' : 'fail', `${file} ${ok ? 'exists' : 'is missing'}`)
   }
+}
+
+async function checkComposeBoundary() {
+  const text = await readTextIfPresent(path.join(root, 'docker-compose.yml'))
+  if (!text) {
+    record('fail', 'docker-compose.yml is missing')
+    return
+  }
+
+  const services = []
+  let inServices = false
+  for (const line of text.split(/\r?\n/)) {
+    if (/^services:\s*$/.test(line)) {
+      inServices = true
+      continue
+    }
+    if (inServices && /^\S/.test(line)) break
+    const match = inServices ? line.match(/^  ([A-Za-z0-9_-]+):\s*$/) : null
+    if (match) services.push(match[1])
+  }
+
+  record(services.length === 1 && services[0] === 'app', 'Docker Compose manages only the app service')
+  record(!/(?:^|\n)\s*caddy:\s*(?:\n|$)/.test(text), 'Docker Compose does not declare Caddy')
+  record(!/['"]?(?:80|443):(?:80|443)['"]?/.test(text), 'Docker Compose does not publish global HTTP/HTTPS ports')
+  record(!/deploy\/Caddyfile|caddy-data|caddy-config/.test(text), 'Docker Compose does not own edge configuration or certificate volumes')
+  record(/edge-gateway:\s*\n\s+external:\s*true/.test(text), 'Docker Compose uses the external edge-gateway network')
+  record(/aliases:\s*\n\s+- app/.test(text), 'app keeps the stable edge-network alias')
+  record(/GIT_REVISION:\s*\$\{GIT_REVISION:-\}/.test(text), 'Docker Compose passes the release revision without an unknown fallback')
+  record(!/GIT_REVISION:\s*\$\{GIT_REVISION:-unknown\}/.test(text), 'Docker Compose cannot silently build an unknown revision')
+
+  const dockerfile = await readTextIfPresent(path.join(root, 'Dockerfile'))
+  record(
+    /ARG GIT_REVISION=\s*\n[\s\S]*Invalid GIT_REVISION[\s\S]*\$\{#GIT_REVISION\}[\s\S]*-ge 7[\s\S]*\$\{#GIT_REVISION\}[\s\S]*-le 40/.test(dockerfile),
+    'Docker image build rejects missing or invalid release revisions',
+  )
 }
 
 async function checkDockerignore() {
@@ -86,7 +121,6 @@ async function checkEnvExample() {
     'BACKUP_DIR',
     'BACKUP_ENCRYPTION_KEY',
     'BACKUP_ENCRYPTION_REQUIRED',
-    'APP_DOMAIN',
     'ALLOW_SIGNUP',
     'INITIAL_ADMIN_EMAIL',
     'INITIAL_ADMIN_PASSWORD',

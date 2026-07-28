@@ -11,7 +11,13 @@ RUN npm run build
 
 FROM node:22-slim AS runtime
 
-ARG GIT_REVISION=unknown
+ARG GIT_REVISION=
+
+RUN case "$GIT_REVISION" in \
+      ''|*[!0-9a-fA-F]*) echo "Invalid GIT_REVISION" >&2; exit 1 ;; \
+    esac; \
+    test "${#GIT_REVISION}" -ge 7; \
+    test "${#GIT_REVISION}" -le 40
 
 WORKDIR /app
 ENV NODE_ENV=production

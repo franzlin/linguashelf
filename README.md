@@ -17,6 +17,15 @@ npm run dev
 
 默认没有配置 API key 时，系统会使用本地演示生成器，方便立刻体验完整流程。
 
+配置有两种方式，优先级为「网页自定义 > `.env` > 内置默认」：
+
+- **网页自定义（推荐日常调整）**：登录后进入「AI 服务 → 自定义 API」，为每类能力单独填写接口地址、API key 和模型。保存后立即生效，不需要重启容器。已保存的 key 只以掩码形式回显（例如 `sk-••••mnop`），任何接口、日志或页面都不会返回明文。留空的字段继续沿用 `.env`。
+- **`.env`（部署时的基线配置）**：适合首次部署和无人值守场景，含义见下方清单。
+
+可自定义的能力：文本生成、听力预热 TTS、Qwen 播客 TTS、Gemini 3.1 播客 TTS、Gemini 2.5 播客 TTS、PDF 视觉 OCR。
+
+文本生成对第三方「OpenAI 兼容」端点做了自动适配：先尝试 Responses 接口，返回 404 时改用 `chat/completions`；端点拒绝 `json_schema` 时依次降级为 `json_object` 和「把 schema 写进提示词」；拒绝 `reasoning`/`verbosity` 参数时会去掉这两个字段重试。哪种组合可用会按端点缓存，只探测一次。也可以在「接口风格」「结构化输出」里手动固定，跳过探测。
+
 如需调用第三方 AI，在项目根目录创建 `.env`：
 
 ```bash
@@ -266,10 +275,23 @@ RATE_LIMIT_UPLOAD_MAX=8
 STORAGE_DRIVER=json
 ```
 
+## 服务端结构
+
+`server/` 按依赖方向分层，下层不引用上层：
+
+- 基础设施：`config.js`（全部环境变量）、`storage.js`、`http.js`、`session` 相关的 `ratelimit.js` / `users.js` / `quota.js`
+- 解析：`epub.js`、`pdf.js`、`pdf-text.js`、`ocr.js`
+- AI：`ai-config.js`（自定义端点与方言适配）、`ai-runtime.js`（配置缓存）、`tts.js`、`ai-services.js`
+- 领域：`units.js`、`content.js`、`quality.js`、`repair.js`、`progress.js`、`stats.js`、`micro.js`、`podcast.js`、`settings.js`
+- 任务：`jobs.js`、`job-diagnosis.js`、`telemetry.js`
+- HTTP：`routes/` 下九个文件，由 `app.js` 装配；`index.js` 只负责启动
+
+拆分方案、实施记录和验证工具说明见 [SERVER_MODULARIZATION_PLAN.md](./SERVER_MODULARIZATION_PLAN.md)。
+
 ## 常用命令
 
 ```bash
-npm run check
+npm run verify
 npm run build
 npm run e2e
 npm run visual
@@ -277,9 +299,22 @@ npm run predeploy
 npm start
 ```
 
+`npm run verify` 会依次运行类型检查、服务端符号一致性、导入完整性、路由清单、核心纯函数单测、自定义 API 测试和 API 回归测试，约 40 秒，不需要浏览器或构建产物。改动服务端后先跑它。
+
+两个按需工具：
+
+```bash
+npm run measure:storage -- --project   # 快照读取耗时与增长曲线
+npm run compare:models                 # 多模型忠实度与合规度横评
+```
+
+`measure:storage` 用来判断「要不要把整库快照改成行级仓储」——先看数据再决定，别凭感觉。`compare:models` 首次运行会生成 `scripts/model-candidates.json` 模板（已加入 `.gitignore`，key 可写成 `env:VAR_NAME`）；填好候选模型后，它会用同一段原文跑一遍，对比忠实度得分、词数达标率和结构合规度。
+
 `npm start` 会以生产模式运行已构建的 `dist`。
 
-`npm run e2e` 会使用隔离数据目录和外部 Chromium 执行完整业务回归。`npm run visual` 会启动隔离测试服务器，生成桌面首页、桌面书库、Android 390px 书库和移动端更多导航截图，并检查横向溢出、移动导航可见性、触控高度和浏览器控制台错误。截图输出到 `work-screenshots/frontend-rebuild`。
+`npm run test:ai` 会运行自定义 API 配置的单元测试和集成测试：集成测试会启动真实服务端并连到假的上游端点，验证网页改配置后立即生效、接口方言自动降级、部分保存不清空其他字段、以及任何响应都不泄漏 key。不需要真实 API key，也不产生外部请求。
+
+`npm run e2e` 会使用隔离数据目录和外部 Chromium 执行完整业务回归。`npm run visual` 会启动隔离测试服务器，生成桌面首页、桌面书库、Android 390px 书库、自定义 API 面板（桌面与 390px）和移动端更多导航截图，并检查横向溢出、移动导航可见性、登录按钮与表单控件触控高度、API key 输入框不预填，以及浏览器控制台错误。截图输出到 `work-screenshots/frontend-rebuild`。
 
 如果服务已经启动，可以带上目标地址做 HTTP 验收：
 
@@ -290,7 +325,18 @@ npm run smoke
 
 ## 部署
 
-部署到服务器时推荐使用 Docker Compose + Caddy，详见 [DEPLOYMENT.md](./DEPLOYMENT.md)。上线前验收记录见 [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md)。
+生产环境中，LinguaShelf Compose 只管理应用容器；VPS 的全局 Caddy、证书和其他网站由独立 `/opt/caddy` 管理。详见 [DEPLOYMENT.md](./DEPLOYMENT.md)，上线验收记录见 [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md)。
+
+`/api/health` 会返回运行中的 git 修订号（`revision` 字段）。生产发布只能经过全局边缘网关提供的应用专用门禁脚本，它会验证 Caddy 与 CLIProxyAPI 未被修改或重建，并只更新 `app`：
+
+```bash
+GIT_REVISION=<已提交的7至40位十六进制修订号> /opt/caddy/scripts/deploy-linguashelf-app.sh
+curl -s https://你的域名/api/health
+```
+
+发布脚本和镜像构建都会拒绝缺失或无效的 revision；应用健康、revision 一致且全站验收通过后才更新
+`/opt/linguashelf/.deployed-revision`。禁止在应用目录运行无服务名的
+`docker compose up -d --build`。本仓库不再拥有 Caddy 配置、80/443 端口或证书卷。
 
 备份和恢复：
 
