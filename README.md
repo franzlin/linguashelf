@@ -334,7 +334,7 @@ GIT_REVISION=<已提交的7至40位十六进制修订号> /opt/caddy/scripts/dep
 curl -s https://你的域名/api/health
 ```
 
-发布脚本和镜像构建都会拒绝缺失或无效的 revision；应用健康、revision 一致且全站验收通过后才更新
+发布脚本和镜像构建都会拒绝缺失或无效的 revision；切换 `app` 后最多等待 60 秒直到 `/api/ready` 可访问，应用健康、revision 一致且全站验收通过后才更新
 `/opt/linguashelf/.deployed-revision`。禁止在应用目录运行无服务名的
 `docker compose up -d --build`。本仓库不再拥有 Caddy 配置、80/443 端口或证书卷。
 

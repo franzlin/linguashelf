@@ -13,7 +13,7 @@ GIT_REVISION=<已提交的7至40位十六进制修订号> /opt/caddy/scripts/dep
 该脚本和 Docker 镜像构建都会拒绝缺失或格式错误的 `GIT_REVISION`。脚本在发布前后
 锁定全局 Caddy 与 CLIProxyAPI 的容器 ID、配置哈希和路由状态，只执行
 `docker compose build app` 与 `docker compose up -d --no-deps app`。应用健康接口返回
-同一 revision 且全站验收通过后，脚本才会原子更新
+后，脚本最多等待 60 秒直到 `/api/ready` 可访问；同一 revision 且全站验收通过后，才会原子更新
 `/opt/linguashelf/.deployed-revision`。`docker compose ps/logs/exec` 等非构建运维命令
 不需要设置 revision。
 
