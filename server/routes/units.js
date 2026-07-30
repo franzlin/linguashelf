@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import { nanoid } from 'nanoid'
 import { buildGeneratedContent, generationSettingsFromBody } from './../content.js'
+import { normalizeUnitContent } from './../content-compat.js'
 import { parseStatusCode } from './../job-diagnosis.js'
 import {
   activeGenerationJob,
@@ -162,7 +163,8 @@ export function registerUnitsRoutes(app) {
         }
         const progress = ensureUnitProgress(db, req.user.id, unit.id)
         if (Object.prototype.hasOwnProperty.call(req.body, 'paragraphIndex')) {
-          const maxParagraph = Math.max(0, (unit.content?.reading?.paragraphs?.length || 1) - 1)
+          const normalizedContent = normalizeUnitContent(unit.content, unit)
+          const maxParagraph = Math.max(0, (normalizedContent?.reading.paragraphs.length || 1) - 1)
           progress.paragraphIndex = Math.max(0, Math.min(maxParagraph, Number(req.body.paragraphIndex || 0)))
         }
         if (Object.prototype.hasOwnProperty.call(req.body, 'listeningCompleted')) progress.listeningCompleted = Boolean(req.body.listeningCompleted)
@@ -208,7 +210,9 @@ export function registerUnitsRoutes(app) {
         }
 
         const answers = req.body.answers || {}
-        const questions = unit.content.questions || []
+        const normalizedContent = normalizeUnitContent(unit.content, unit)
+        const normalizedUnit = { ...unit, content: normalizedContent }
+        const questions = normalizedContent?.questions || []
         const correctCount = questions.filter((question) => Number(answers[question.id]) === Number(question.answerIndex)).length
         const wrongQuestions = questions
           .filter((question) => Number(answers[question.id]) !== Number(question.answerIndex))
@@ -220,7 +224,7 @@ export function registerUnitsRoutes(app) {
           }))
         const correctRate = questions.length ? correctCount / questions.length : 0
         const viewedWords = Array.isArray(req.body.viewedWords) ? req.body.viewedWords : []
-        const vocabularyResult = saveUnitVocabularyFromCompletion(db, req.user.id, book, unit, wrongQuestions, viewedWords)
+        const vocabularyResult = saveUnitVocabularyFromCompletion(db, req.user.id, book, normalizedUnit, wrongQuestions, viewedWords)
 
         const currentSettings = userSettings(db, req.user.id)
         const report = {
@@ -248,7 +252,7 @@ export function registerUnitsRoutes(app) {
         progress.answers = answers
         progress.completed = true
         progress.listeningCompleted = Boolean(req.body.listeningCompleted || progress.listeningCompleted)
-        progress.paragraphIndex = Math.max(progress.paragraphIndex || 0, (unit.content.reading?.paragraphs?.length || 1) - 1)
+        progress.paragraphIndex = Math.max(progress.paragraphIndex || 0, (normalizedContent?.reading.paragraphs.length || 1) - 1)
         progress.updatedAt = new Date().toISOString()
         db.reports.push(report)
         report.levelAdjustment = applyAdaptiveLeveling(db, req.user.id)
@@ -270,12 +274,13 @@ export function registerUnitsRoutes(app) {
         return
       }
 
-      const audioRequest = buildSpeechAudioRequest(unit)
+      const normalizedUnit = { ...unit, content: normalizeUnitContent(unit.content, unit) }
+      const audioRequest = buildSpeechAudioRequest(normalizedUnit)
       const cachedAudio = await hasCachedSpeechAudio(audioRequest)
       if (!cachedAudio && shouldRateLimitSpeech() && !consumeUserQuota(req, res, 'speech-audio')) return
       let audio
       try {
-        audio = await generateSpeechAudio(unit, audioRequest)
+        audio = await generateSpeechAudio(normalizedUnit, audioRequest)
       } catch (error) {
         if (!cachedAudio) {
           recordAiUsage(db, {

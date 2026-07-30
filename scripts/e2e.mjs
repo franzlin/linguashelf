@@ -464,6 +464,50 @@ function upsert(db, collection, id, payload) {
   ).run(collection, id, JSON.stringify(payload), new Date().toISOString())
 }
 
+function insertLegacyGeneratedLesson(bookId) {
+  const db = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
+  const now = new Date().toISOString()
+  const unit = {
+    id: 'e2e-legacy-generated-lesson',
+    bookId,
+    title: 'Legacy generated lesson',
+    status: 'generated',
+    sourceLocation: 'Legacy chapter',
+    sourceText: 'Private legacy source text.',
+    sourceExcerpt: 'Private legacy source excerpt.',
+    sourceWordCount: 12,
+    content: {
+      lessonTitle: 'Legacy generated lesson',
+      level: 'A2',
+      concepts: [{ term: 'legacy', explanation: 'Something kept from an earlier version.' }],
+      vocabulary: [{ word: 'continuity', definition: 'The state of continuing over time.' }],
+      listeningText: 'This is a legacy listening warm-up.',
+      readingText: { paragraphs: ['The first legacy paragraph.', 'The second legacy paragraph.'] },
+      comprehensionQuestions: [{ question: 'What does the lesson preserve?', answer: 'It preserves older study content.' }],
+      generationMode: 'ai',
+    },
+    quality: {
+      readingWords: 9,
+      listeningWords: 7,
+      paragraphCount: 2,
+      questionCount: 1,
+      sourceRefs: [],
+      sourceMap: [],
+      fidelity: null,
+      status: 'review',
+      warnings: [],
+    },
+    createdAt: now,
+    generatedAt: now,
+  }
+  try {
+    upsert(db, 'units', unit.id, unit)
+  } finally {
+    db.close()
+  }
+  return unit
+}
+
 function replaceBookUnitsWithLegacyFragments(bookId, wordsPerUnit = 260) {
   const db = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
   try {
@@ -896,6 +940,7 @@ try {
     await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })
   ).json()
   const libraryLayoutBook = libraryAppPayload.books.find((book) => book.title === 'E2E History Reader')
+  insertLegacyGeneratedLesson(libraryLayoutBook.id)
   const mojibakeBookTitle = 'Ottoman expansion and military power, 1300â\u0080\u00931453 -- Illustrated edition -- 9780465008506 -- 22f15bb1a2194c34bd06ba3c0fdaf0dc -- Annaâ\u0080\u0099s Archive'
   const displayBookTitle = 'Ottoman expansion and military power, 1300–1453'
   const renameForLayoutResponse = await page.request.patch(`${baseUrl}/api/books/${libraryLayoutBook.id}`, {
@@ -1182,6 +1227,21 @@ try {
     await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
     await page.getByRole('heading', { name: '学习单元' }).waitFor()
   }
+  const legacyLessonRow = page.locator('.unit-row').filter({ hasText: 'Legacy generated lesson' })
+  if ((await legacyLessonRow.count()) !== 1) throw new Error('Legacy generated lesson was not listed exactly once')
+  await legacyLessonRow.getByRole('button', { name: '学习' }).click()
+  await page.getByRole('heading', { name: 'Legacy generated lesson' }).waitFor()
+  await page.getByRole('heading', { name: '分级阅读' }).waitFor()
+  await page.getByText('The first legacy paragraph.').waitFor()
+  const referenceAnswerButton = page.getByRole('button', { name: '查看参考答案' })
+  if ((await referenceAnswerButton.count()) !== 1) throw new Error('Legacy reference-answer control was not rendered')
+  await referenceAnswerButton.click()
+  await page.getByText('It preserves older study content.').waitFor()
+  if (!(await page.getByRole('button', { name: '完成单元' }).isEnabled())) {
+    throw new Error('Reviewing a legacy reference answer did not enable completion')
+  }
+  await page.getByRole('button', { name: '返回单元' }).click()
+  await page.getByRole('heading', { name: '学习单元' }).waitFor()
   await page.screenshot({ path: path.join(screenshotDir, 'book-detail.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   const mobileBookMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))

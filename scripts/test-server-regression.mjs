@@ -13,6 +13,7 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { DatabaseSync } from 'node:sqlite'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -285,6 +286,54 @@ try {
   check('every unit carries source word statistics', epubUnits.every((unit) => (unit.sourceWordCount || 0) > 0))
   check('units are not split by page', epubUnits.every((unit) => !/^第\s*\d+\s*页$/.test(unit.sourceLocation || '')))
 
+  const legacyUnitId = 'legacy-regression-unit'
+  const legacyUnit = {
+    id: legacyUnitId,
+    bookId: epubBook.id,
+    title: 'Legacy generated lesson',
+    status: 'generated',
+    sourceLocation: 'Legacy chapter',
+    sourceText: 'Private source text must stay on the server.',
+    sourceExcerpt: 'Private source excerpt.',
+    sourceWordCount: 12,
+    content: {
+      lessonTitle: 'Legacy generated lesson',
+      level: 'A2',
+      concepts: [{ term: 'legacy', explanation: 'Something kept from an earlier version.' }],
+      vocabulary: [{ word: 'continuity', definition: 'The state of continuing over time.' }],
+      listeningText: 'This is a legacy listening warm-up.',
+      readingText: { paragraphs: ['The first legacy paragraph.', 'The second legacy paragraph.'] },
+      comprehensionQuestions: [{ question: 'What does the lesson preserve?', answer: 'It preserves older study content.' }],
+      generationMode: 'ai',
+    },
+    quality: {
+      readingWords: 9,
+      listeningWords: 7,
+      paragraphCount: 2,
+      questionCount: 1,
+      sourceRefs: [],
+      sourceMap: [],
+      fidelity: null,
+      status: 'review',
+      warnings: [],
+    },
+    generatedAt: new Date().toISOString(),
+  }
+  const fixtureDb = new DatabaseSync(path.join(dataDir, 'app.sqlite'))
+  fixtureDb.prepare('INSERT INTO records (collection, id, payload, updatedAt) VALUES (?, ?, ?, ?)').run(
+    'units',
+    legacyUnitId,
+    JSON.stringify(legacyUnit),
+    new Date().toISOString(),
+  )
+  fixtureDb.close()
+  const legacyDetail = await api(`/api/books/${epubBook.id}`)
+  const legacyPublicUnit = (legacyDetail.json?.units || []).find((item) => item.id === legacyUnitId)
+  check('legacy generated units are returned in the current content shape', Boolean(legacyPublicUnit?.content?.reading?.paragraphs?.length))
+  check('legacy listening text is preserved', legacyPublicUnit?.content?.listening?.text === legacyUnit.content.listeningText)
+  check('legacy open questions become reference-answer questions', legacyPublicUnit?.content?.questions?.[0]?.options?.length === 0)
+  check('legacy unit responses still hide raw source text', legacyPublicUnit?.sourceText === undefined)
+
   // --- PDF ----------------------------------------------------------------
   section('PDF parsing')
   const pdfUpload = await uploadBook('regression.pdf', makeTextPdf(10), 'application/pdf')
@@ -358,6 +407,15 @@ try {
   check('a study report is produced', Boolean(completion.json?.report))
   check('the report scores accuracy', typeof completion.json?.report?.correctRate === 'number')
   check('the report counts questions', (completion.json?.report?.questionCount || 0) > 0)
+
+  const legacyQuestion = legacyPublicUnit?.content?.questions?.[0]
+  const legacyCompletion = await api(`/api/units/${legacyUnitId}/complete`, {
+    method: 'POST',
+    body: JSON.stringify({ answers: { [legacyQuestion.id]: 0 }, listeningCompleted: true }),
+  })
+  check('legacy reference-answer units can be completed', legacyCompletion.status === 200, `${legacyCompletion.status} ${legacyCompletion.text.slice(0, 200)}`)
+  check('legacy completion uses the normalized question count', legacyCompletion.json?.report?.questionCount === 1)
+  check('legacy completion records the viewed reference answer as correct', legacyCompletion.json?.report?.correctCount === 1)
 
   const afterCompletion = await api('/api/app')
   check('completion records vocabulary counters', typeof completion.json?.report?.savedVocabularyCount === 'number')

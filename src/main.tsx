@@ -1,12 +1,15 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+import { AppErrorBoundary } from './components/AppErrorBoundary'
 import './style.css'
 import './rebuild.css'
 
 createRoot(document.getElementById('app')!).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>,
 )
 

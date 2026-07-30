@@ -3,6 +3,7 @@
 // `publicUnit` is the single place that decides what a client may see: it always
 // strips `sourceText`, so the uploaded book's text never leaves the server.
 import { nanoid } from 'nanoid'
+import { normalizeUnitContent } from './content-compat.js'
 import { progressKey } from './storage.js'
 import { takeWords, wordCount } from './text.js'
 import { assessContentQuality, contentMetrics, normalizeClaimText, textKeywordSimilarity } from './quality.js'
@@ -54,8 +55,8 @@ export function publicProgress(progress) {
 }
 
 export function buildVersionDiff(version, unit) {
-  const previous = version?.content
-  const current = unit?.content
+  const previous = normalizeUnitContent(version?.content, unit)
+  const current = normalizeUnitContent(unit?.content, unit)
   if (!previous || !current) return null
 
   const previousMetrics = contentMetrics(previous)
@@ -107,6 +108,7 @@ export function buildVersionDiff(version, unit) {
 export function publicUnit(unit, db = null, userId = '') {
   if (!unit) return null
   const { sourceText, versions, ...safeUnit } = unit
+  safeUnit.content = normalizeUnitContent(unit.content, unit)
   safeUnit.versions = (versions || []).map((version, index) => ({
     id: version.id || `version-${index}`,
     title: version.title || `历史版本 ${index + 1}`,

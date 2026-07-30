@@ -62,6 +62,7 @@ type SourceMapItem = NonNullable<NonNullable<Unit['quality']>['sourceMap']>[numb
 
 function SourceMapDetail({ item, generatedText }: { item: SourceMapItem; generatedText?: string }) {
   const generated = generatedText || item.generatedExcerpt || ''
+  const sourceRefs = Array.isArray(item.sourceRefs) ? item.sourceRefs : []
   return (
     <div className="source-map-detail">
       {generated && (
@@ -72,8 +73,8 @@ function SourceMapDetail({ item, generatedText }: { item: SourceMapItem; generat
           </div>
           <div className="source-compare-pane source">
             <span>最相关来源</span>
-            {item.sourceRefs.length ? (
-              item.sourceRefs.map((ref) => (
+            {sourceRefs.length ? (
+              sourceRefs.map((ref) => (
                 <div key={ref.id} className="source-ref-block">
                   <strong>{ref.label} · 匹配 {formatPercent(ref.keywordOverlap || 0)}</strong>
                   <p>{ref.excerpt}</p>
@@ -175,12 +176,18 @@ export function StudyPage({
     updatedAt: unit.progress?.updatedAt,
   })
   const content = unit.content
+  const concepts = Array.isArray(content?.concepts) ? content.concepts : []
+  const questions = Array.isArray(content?.questions) ? content.questions : []
+  const readingParagraphs = Array.isArray(content?.reading?.paragraphs) ? content.reading.paragraphs : []
+  const listeningText = typeof content?.listening?.text === 'string' ? content.listening.text : ''
+  const readingLevel = content?.level?.reading || 'A2'
+  const listeningLevel = content?.level?.listening || 'A1'
   const qualityAudit = unit.quality?.fidelity?.audit
   const unsupportedClaims = qualityAudit?.unsupportedClaims || []
   const missingImportantIdeas = qualityAudit?.missingImportantIdeas || []
   const lowFidelityScore = qualityAudit?.score !== undefined && Number(qualityAudit.score) < 0.6
   const lowQualitySourceMapItems = (unit.quality?.sourceMap || []).filter(
-    (item) => item.status === 'review' || !item.sourceRefs.length || Number(item.confidence || 0) < 0.12 || Boolean(item.suspiciousSentences?.length)
+    (item) => item.status === 'review' || !item.sourceRefs?.length || Number(item.confidence || 0) < 0.12 || Boolean(item.suspiciousSentences?.length)
   )
   const lowQualityParagraphNumbers = lowQualitySourceMapItems.map((item) => Number(item.readingParagraph || 0)).filter(Boolean)
   const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length || lowQualitySourceMapItems.length)
@@ -237,8 +244,14 @@ export function StudyPage({
 
   const vocabularyMap = useMemo(() => {
     const map = new Map<string, VocabularyItem>()
-    for (const item of content?.vocabulary || []) map.set(item.term.toLowerCase(), item)
-    for (const item of Object.values(dynamicDefinitions)) map.set(item.term.toLowerCase(), item)
+    for (const item of content?.vocabulary || []) {
+      const term = String(item?.term || '').trim().toLowerCase()
+      if (term) map.set(term, item)
+    }
+    for (const item of Object.values(dynamicDefinitions)) {
+      const term = String(item?.term || '').trim().toLowerCase()
+      if (term) map.set(term, item)
+    }
     return map
   }, [content, dynamicDefinitions])
 
@@ -272,7 +285,7 @@ export function StudyPage({
     )
   }
 
-  const answeredAll = content.questions.every((question) => answers[question.id] !== undefined)
+  const answeredAll = questions.length > 0 && questions.every((question) => answers[question.id] !== undefined)
 
   function saveProgress(partial: Partial<UnitProgress>) {
     const snapshot = { ...latestProgressRef.current, ...partial }
@@ -429,7 +442,6 @@ export function StudyPage({
   }
 
   async function playListening() {
-    const listeningText = content?.listening.text
     if (!listeningText) return
 
     if (speaking) {
@@ -568,8 +580,8 @@ export function StudyPage({
     setRegeneratingFaithful(true)
     try {
       const regenerated = await onRegenerateUnit(unit, {
-        readingLevel: content.level.reading,
-        listeningLevel: content.level.listening,
+        readingLevel,
+        listeningLevel,
         fidelityMode: 'strict',
       })
       if (regenerated) {
@@ -614,10 +626,10 @@ export function StudyPage({
           </button>
           <div>
             <span className="eyebrow">
-              阅读 {content.level.reading} · 听力 {content.level.listening}
+              阅读 {readingLevel} · 听力 {listeningLevel}
             </span>
-            <h1>{content.title}</h1>
-            <p>{content.sourceLocation}</p>
+            <h1>{content.title || unit.title}</h1>
+            <p>{content.sourceLocation || unit.sourceLocation}</p>
           </div>
           <div className="study-head-tools">
             <button
@@ -694,7 +706,7 @@ export function StudyPage({
                 </button>
               </div>
             )}
-            {unit.quality.warnings.length > 0 && <p>{unit.quality.warnings.join('；')}</p>}
+            {(unit.quality.warnings || []).length > 0 && <p>{(unit.quality.warnings || []).join('；')}</p>}
             {unit.quality.fidelity?.audit && (
               <div className="quality-note">
                 <strong>{unit.quality.fidelity.audit.mode === 'ai' ? 'AI 审稿' : '本地审稿'}：{unit.quality.fidelity.audit.verdict}</strong>
@@ -717,11 +729,11 @@ export function StudyPage({
                       .join('；')}
                   </p>
                 )}
-                {(unit.quality.sourceMap || []).some((item) => !item.sourceRefs.length) && (
+                {(unit.quality.sourceMap || []).some((item) => !item.sourceRefs?.length) && (
                   <p>
                     缺少明确来源映射：
                     {(unit.quality.sourceMap || [])
-                      .filter((item) => !item.sourceRefs.length)
+                      .filter((item) => !item.sourceRefs?.length)
                       .map((item) => `阅读第 ${item.readingParagraph} 段`)
                       .join('、')}
                   </p>
@@ -754,7 +766,7 @@ export function StudyPage({
                         </button>
                       )}
                     </div>
-                    <SourceMapDetail item={item} generatedText={content.reading.paragraphs[item.readingParagraph - 1]?.text} />
+                    <SourceMapDetail item={item} generatedText={readingParagraphs[item.readingParagraph - 1]?.text} />
                   </div>
                 ))}
               </details>
@@ -789,7 +801,7 @@ export function StudyPage({
                               <span>{version.diff.summary.levelChanged ? '难度有变化' : '难度未变'}</span>
                             </div>
                             <div className="version-paragraph-diffs">
-                              {version.diff.paragraphDiffs.filter((item) => item.changed).slice(0, 5).map((item) => (
+                              {(version.diff.paragraphDiffs || []).filter((item) => item.changed).slice(0, 5).map((item) => (
                                 <div key={`${version.id}-${item.paragraph}`}>
                                   <strong>第 {item.paragraph} 段 · 相似度 {formatPercent(item.similarity)} · {formatSigned(item.wordDelta)} 词</strong>
                                   <p>旧：{item.previousPreview || '无'}</p>
@@ -815,7 +827,7 @@ export function StudyPage({
         <section className="learning-block">
           <h2>概念预习</h2>
           <div className="concept-grid">
-            {content.concepts.map((concept) => (
+            {concepts.map((concept) => (
               <button key={concept.term} type="button" onClick={() => setAid({ kind: 'concept', concept })}>
                 <strong>{concept.term}</strong>
                 <span>{concept.simpleEnglish}</span>
@@ -841,7 +853,7 @@ export function StudyPage({
           </button>
           <audio ref={audioElementRef} className="audio-anchor" preload="auto" playsInline />
           <span className={listeningCompleted ? 'listen-state done' : 'listen-state'}>{listeningCompleted ? '听力已完成' : '尚未完成听力'}</span>
-          {showTranscript && <p className="transcript">{content.listening.text}</p>}
+          {showTranscript && <p className="transcript">{listeningText}</p>}
         </section>
 
         <section className="learning-block reading-block">
@@ -851,7 +863,7 @@ export function StudyPage({
               <h2>分级阅读</h2>
             </div>
           </div>
-          {content.reading.paragraphs.map((paragraph, paragraphIndex) => {
+          {readingParagraphs.map((paragraph, paragraphIndex) => {
             const sourceMapItem = sourceMapForParagraph(unit, paragraphIndex)
             const needsParagraphReview = reviewMode && sourceMapItem?.status === 'review'
             return (
@@ -914,12 +926,12 @@ export function StudyPage({
         <section className="learning-block">
           <h2>理解题</h2>
           <div className="question-list">
-            {content.questions.map((question, questionIndex) => (
+            {questions.map((question, questionIndex) => (
               <article key={question.id} className="question-item">
                 <h3>
                   {questionIndex + 1}. {question.prompt}
                 </h3>
-                <div className="options-grid">
+                {question.options.length > 0 ? <div className="options-grid">
                   {question.options.map((option, optionIndex) => (
                     <button
                       key={`${question.id}-${option}`}
@@ -930,10 +942,18 @@ export function StudyPage({
                       {option}
                     </button>
                   ))}
-                </div>
-                {answers[question.id] !== undefined && answers[question.id] !== question.answerIndex && (
-                  <details className="answer-help">
-                    <summary>中文解释</summary>
+                </div> : (
+                  <button
+                    type="button"
+                    className={answers[question.id] !== undefined ? 'ghost-button selected' : 'ghost-button'}
+                    onClick={() => selectAnswer(question.id, 0)}
+                  >
+                    {answers[question.id] !== undefined ? '已查看参考答案' : '查看参考答案'}
+                  </button>
+                )}
+                {answers[question.id] !== undefined && (!question.options.length || answers[question.id] !== question.answerIndex) && (
+                  <details className="answer-help" open={!question.options.length}>
+                    <summary>{question.options.length ? '中文解释' : '参考答案'}</summary>
                     <p>{question.explanationZh}</p>
                   </details>
                 )}
@@ -977,7 +997,7 @@ export function StudyPage({
           <span>已点生词</span>
           <strong>{viewedWords.size}</strong>
         </div>
-        <p className="fidelity-note">{content.fidelityNote}</p>
+        <p className="fidelity-note">{content.fidelityNote || '此单元使用兼容模式显示。'}</p>
       </aside>
     </section>
   )

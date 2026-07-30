@@ -15,6 +15,8 @@ import { cleanPdfPages, isPdfProductionArtifactLine, isLikelyPageNumber, formatP
 import { diagnoseJobError, canAutoRetryJob } from '../server/job-diagnosis.js'
 import { normalizeLevel, shiftLevel, readingLevels, listeningLevels } from '../server/levels.js'
 import { wordCount, extractKeywords } from '../server/text.js'
+import { normalizeUnitContent } from '../server/content-compat.js'
+import { publicUnit } from '../server/progress.js'
 
 let passed = 0
 let failed = 0
@@ -296,6 +298,63 @@ test('page ranges format for provenance display', () => {
   assert.ok(formatPdfPageRange(4, 4).includes('4'))
   assert.ok(formatPdfPageRange(4, 9).includes('4'))
   assert.ok(formatPdfPageRange(4, 9).includes('9'))
+})
+
+console.log('\n· legacy lesson compatibility')
+
+test('flat legacy lesson fields become the current study shape', () => {
+  const legacy = {
+    concepts: [{ term: 'industrial policy', explanation: 'Government action that supports selected industries.' }],
+    vocabulary: [{ word: 'subsidy', definition: 'Money given to support an activity.' }],
+    listeningText: 'A short listening introduction.',
+    readingText: ['First legacy paragraph.', 'Second legacy paragraph.'],
+    questions: [{ id: 'legacy-q1', question: 'What is the main idea?', answer: 'Industrial policy.' }],
+    generationMode: 'ai',
+  }
+  const normalized = normalizeUnitContent(legacy, { id: 'legacy-unit', title: 'Legacy lesson', sourceLocation: 'Chapter 1' })
+  assert.equal(normalized.title, 'Legacy lesson')
+  assert.deepEqual(normalized.level, { reading: 'A2', listening: 'A1' })
+  assert.equal(normalized.listening.text, legacy.listeningText)
+  assert.equal(normalized.reading.paragraphs.length, 2)
+  assert.equal(normalized.concepts[0].simpleEnglish, legacy.concepts[0].explanation)
+  assert.equal(normalized.vocabulary[0].term, 'subsidy')
+  assert.deepEqual(normalized.questions[0].options, [])
+  assert.equal(normalized.questions[0].explanationZh, 'Industrial policy.')
+})
+
+test('nested legacy paragraphs and comprehension questions are preserved', () => {
+  const normalized = normalizeUnitContent({
+    lessonTitle: 'Company history',
+    level: 'A2',
+    listeningText: 'Listen to the company history.',
+    readingText: { paragraphs: ['Paragraph one.', 'Paragraph two.'] },
+    comprehensionQuestions: [{ question: 'Who founded the company?', answer: 'The founder named in the source.' }],
+  }, { id: 'legacy-company', sourceLocation: 'Pages 1-4' })
+  assert.equal(normalized.title, 'Company history')
+  assert.equal(normalized.level.reading, 'A2')
+  assert.equal(normalized.level.listening, 'A1')
+  assert.equal(normalized.reading.paragraphs[1].text, 'Paragraph two.')
+  assert.equal(normalized.questions[0].id, 'legacy-legacy-company-question-1')
+  assert.equal(normalized.questions[0].prompt, 'Who founded the company?')
+})
+
+test('publicUnit normalizes legacy content without exposing source text', () => {
+  const view = publicUnit({
+    id: 'legacy-public',
+    title: 'Legacy public unit',
+    sourceLocation: 'Pages 4-8',
+    sourceText: 'private uploaded source',
+    content: {
+      title: 'Legacy public unit',
+      level: 'A2',
+      listeningText: 'Listening text.',
+      readingText: ['Reading text.'],
+      comprehensionQuestions: [{ question: 'What happened?', answer: 'The source explains it.' }],
+    },
+  })
+  assert.equal(view.sourceText, undefined)
+  assert.equal(view.content.reading.paragraphs[0].text, 'Reading text.')
+  assert.equal(view.content.questions[0].answerIndex, 0)
 })
 
 console.log('\n· job failure diagnosis')
