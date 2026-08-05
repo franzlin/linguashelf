@@ -60,6 +60,13 @@ function versionReasonLabel(reason: string) {
 
 type SourceMapItem = NonNullable<NonNullable<Unit['quality']>['sourceMap']>[number]
 
+function fidelityVerdictLabel(verdict?: string) {
+  if (verdict === 'pass') return '未发现需要复核的忠实度问题'
+  if (verdict === 'review') return '存在可定位的内容需要复核'
+  if (verdict === 'fail') return '发现高置信度的来源忠实度问题'
+  return verdict || '尚未形成结论'
+}
+
 function SourceMapDetail({ item, generatedText }: { item: SourceMapItem; generatedText?: string }) {
   const generated = generatedText || item.generatedExcerpt || ''
   const sourceRefs = Array.isArray(item.sourceRefs) ? item.sourceRefs : []
@@ -185,9 +192,10 @@ export function StudyPage({
   const qualityAudit = unit.quality?.fidelity?.audit
   const unsupportedClaims = qualityAudit?.unsupportedClaims || []
   const missingImportantIdeas = qualityAudit?.missingImportantIdeas || []
-  const lowFidelityScore = qualityAudit?.score !== undefined && Number(qualityAudit.score) < 0.6
+  const structuredVerdict = qualityAudit?.verdict === 'pass' || qualityAudit?.verdict === 'review' || qualityAudit?.verdict === 'fail'
+  const lowFidelityScore = structuredVerdict ? qualityAudit?.verdict !== 'pass' : qualityAudit?.score !== undefined && Number(qualityAudit.score) < 0.55
   const lowQualitySourceMapItems = (unit.quality?.sourceMap || []).filter(
-    (item) => item.status === 'review' || !item.sourceRefs?.length || Number(item.confidence || 0) < 0.12 || Boolean(item.suspiciousSentences?.length)
+    (item) => item.status === 'review' || !item.sourceRefs?.length || Boolean(item.suspiciousSentences?.length)
   )
   const lowQualityParagraphNumbers = lowQualitySourceMapItems.map((item) => Number(item.readingParagraph || 0)).filter(Boolean)
   const needsFidelityReview = Boolean(lowFidelityScore || unsupportedClaims.length || lowQualitySourceMapItems.length)
@@ -709,7 +717,7 @@ export function StudyPage({
             {(unit.quality.warnings || []).length > 0 && <p>{(unit.quality.warnings || []).join('；')}</p>}
             {unit.quality.fidelity?.audit && (
               <div className="quality-note">
-                <strong>{unit.quality.fidelity.audit.mode === 'ai' ? 'AI 审稿' : '本地审稿'}：{unit.quality.fidelity.audit.verdict}</strong>
+                <strong>{unit.quality.fidelity.audit.mode === 'ai' ? 'AI 审稿' : '本地审稿'}：{fidelityVerdictLabel(unit.quality.fidelity.audit.verdict)}</strong>
                 {unit.quality.fidelity.audit.error && <p>{unit.quality.fidelity.audit.error}</p>}
                 {(unit.quality.fidelity.audit.risks || []).length > 0 && <p>风险：{unit.quality.fidelity.audit.risks.join('；')}</p>}
                 {(unit.quality.fidelity.audit.unsupportedClaims || []).length > 0 && <p>疑似未受原文支持：{unit.quality.fidelity.audit.unsupportedClaims.join('；')}</p>}

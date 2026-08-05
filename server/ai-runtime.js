@@ -18,6 +18,7 @@ import {
   resolvePodcastQwenConfig,
   resolveTextConfig,
 } from './ai-config.js'
+import { assertJsonSchema } from './json-schema.js'
 
 export const aiServiceConfigSettingId = 'ai-service-config'
 
@@ -102,5 +103,8 @@ export function textAiConfigured() {
 export async function callTextAi(request, errorLabel = 'AI 服务') {
   const config = textAiConfig()
   const result = await requestTextAi(config, request, { fetchImpl: fetchTextService, errorLabel })
-  return request.schema ? parseJsonLoose(result.text) : result.text
+  if (!request.schema) return result.text
+  const parsed = parseJsonLoose(result.text)
+  const normalized = typeof request.normalizeResponse === 'function' ? request.normalizeResponse(parsed) : parsed
+  return assertJsonSchema(normalized, request.schema, `${errorLabel}返回内容`)
 }

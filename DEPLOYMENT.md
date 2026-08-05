@@ -188,6 +188,20 @@ BASE_URL=https://你的域名 npm run predeploy
 BASE_URL=https://你的域名 npm run smoke
 ```
 
+部署了忠实度审稿规则变更后，可以先只读预览现有生成单元，再决定是否更新质量数据：
+
+```bash
+docker compose exec app npm run quality:reassess
+```
+
+确认本轮生产备份已经完成后，显式应用重新审稿结果：
+
+```bash
+docker compose exec app npm run quality:reassess:apply
+```
+
+该命令只规范化已有内容并重新计算审稿、质量状态和来源映射，不重新生成文章，不修改学习进度、报告、播客或历史版本。
+
 ## 5. 备份
 
 上线后建议立刻做一次备份，并设置每日自动备份。备份包含 `data/` 目录，也就是 SQLite 数据库、上传文件和音频缓存；`.env` 不会自动打进备份，避免 API key 被误传。

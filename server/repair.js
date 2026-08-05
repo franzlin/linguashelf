@@ -74,12 +74,13 @@ export function lowQualityParagraphIndexes(unit, requested = []) {
     .map((item) => Number(item?.readingParagraph || 0) - 1)
     .filter((value) => value >= 0)
   const fromMap = sourceMap
-    .filter((item) => item.status === 'review' || !item.sourceRefs?.length || Number(item.confidence || 0) < 0.12 || item.suspiciousSentences?.length)
+    .filter((item) => item.status === 'review' || !item.sourceRefs?.length || item.suspiciousSentences?.length)
     .map((item) => Number(item.readingParagraph || 0) - 1)
     .filter((value) => value >= 0)
   const indexes = [...new Set([...fromMap, ...suspicious])]
   if (indexes.length) return indexes.slice(0, 3)
-  if (audit.score !== undefined && Number(audit.score) < 0.55) return [0]
+  if (audit.verdict === 'review' || audit.verdict === 'fail') return [0]
+  if (!['pass', 'review', 'fail'].includes(audit.verdict) && audit.score !== undefined && Number(audit.score) < 0.55) return [0]
   return []
 }
 

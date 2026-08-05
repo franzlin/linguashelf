@@ -111,3 +111,19 @@ export function extractKeywords(text, count = 8) {
     .slice(0, count)
     .map(([word]) => word)
 }
+
+// A deliberately conservative English stemmer for provenance matching. It
+// handles common inflections without pretending to solve general semantics.
+export function normalizeKeyword(value) {
+  let word = String(value || '').toLowerCase().replace(/^'+|'+$/g, '').replace(/'s$/, '')
+  if (word.length > 6 && word.endsWith('ies')) word = `${word.slice(0, -3)}y`
+  else if (word.length > 7 && word.endsWith('ing')) word = undoubleStem(word.slice(0, -3))
+  else if (word.length > 6 && word.endsWith('ed')) word = undoubleStem(word.slice(0, -2))
+  else if (word.length > 6 && word.endsWith('es') && !word.endsWith('ses')) word = word.slice(0, -2)
+  else if (word.length > 5 && word.endsWith('s') && !/(ss|us|is)$/.test(word)) word = word.slice(0, -1)
+  return word
+}
+
+function undoubleStem(value) {
+  return /([b-df-hj-np-tv-z])\1$/.test(value) ? value.slice(0, -1) : value
+}

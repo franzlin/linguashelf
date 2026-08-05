@@ -207,9 +207,9 @@ Android Chrome/PWA 已优先打磨：安装按钮会使用 Android 友好的文�
 
 书籍页支持批量预生成。默认一次最多排队 5 个单元，可通过 `MAX_BATCH_GENERATE_UNITS` 调整。
 
-任务中心支持查看历史任务、暂停、恢复、取消和重试。失败任务会显示下一步建议、自动重试时间、原始错误和本次服务消耗摘要；播客 TTS 失败时可以一键用备用来源重试。生成完成前会做词数、段落数、题目数、来源引用和忠实度关键词覆盖检查；低质量结果默认会自动重试 1 次，可通过 `MAX_AUTO_REGEN_ATTEMPTS` 调整。上游临时错误或限流默认最多自动重试 2 次，可通过 `MAX_AUTO_FAILURE_RETRIES` 和 `AUTO_FAILURE_RETRY_BASE_SECONDS` 调整。
+任务中心支持查看历史任务、暂停、恢复、取消和重试。失败任务会显示下一步建议、自动重试时间、原始错误和本次服务消耗摘要；播客 TTS 失败时可以一键用备用来源重试。生成完成前会做词数、段落数、题目数、来源引用和忠实度关键词覆盖检查。只有长度、段落数、听力或题目数等结构问题，或者完整来源证据下可定位到具体句子的高置信度忠实度问题，才会默认自动重试 1 次；软性的关键词和来源映射提示不会触发整篇重生成。次数可通过 `MAX_AUTO_REGEN_ATTEMPTS` 调整。上游临时错误或限流默认最多自动重试 2 次，可通过 `MAX_AUTO_FAILURE_RETRIES` 和 `AUTO_FAILURE_RETRY_BASE_SECONDS` 调整。
 
-生成质量页会显示 AI/本地忠实度审稿、缺失关键词和逐段来源映射。强制重生成前会保存历史版本，学习页可以从“生成质量”里恢复旧版本。`QUALITY_AUDIT_MODE=off` 可关闭额外 AI 审稿调用。
+生成质量页会显示 AI/本地忠实度审稿、缺失关键词和逐段来源映射。AI 审稿会读取生成时使用的完整 2600 词来源，并要求给出结构化结论、严重度和可定位的具体句子；单独的低分或自由文本结论不会直接把文章标成需要复核。强制重生成前会保存历史版本，学习页可以从“生成质量”里恢复旧版本。`QUALITY_AUDIT_MODE=off` 可关闭额外 AI 审稿调用。
 
 逐段来源映射会在每个阅读段落下显示对应的原书段落、匹配置信度和可疑句子。忠实度偏低时，可以只修复低质量段落；系统会保留整单元历史版本，并只替换被标记的阅读段落。
 
@@ -306,9 +306,10 @@ npm start
 ```bash
 npm run measure:storage -- --project   # 快照读取耗时与增长曲线
 npm run compare:models                 # 多模型忠实度与合规度横评
+npm run quality:reassess               # 只读预览现有单元的新质量判定
 ```
 
-`measure:storage` 用来判断「要不要把整库快照改成行级仓储」——先看数据再决定，别凭感觉。`compare:models` 首次运行会生成 `scripts/model-candidates.json` 模板（已加入 `.gitignore`，key 可写成 `env:VAR_NAME`）；填好候选模型后，它会用同一段原文跑一遍，对比忠实度得分、词数达标率和结构合规度。
+`measure:storage` 用来判断「要不要把整库快照改成行级仓储」——先看数据再决定，别凭感觉。`compare:models` 首次运行会生成 `scripts/model-candidates.json` 模板（已加入 `.gitignore`，key 可写成 `env:VAR_NAME`）；填好候选模型后，它会用同一段原文跑一遍，对比忠实度得分、词数达标率和结构合规度。`quality:reassess` 默认不写数据库；确认备份后运行 `npm run quality:reassess:apply` 才会规范化旧内容并更新审稿与来源映射，不会重新生成文章。
 
 `npm start` 会以生产模式运行已构建的 `dist`。
 

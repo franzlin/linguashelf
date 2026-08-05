@@ -268,6 +268,9 @@ export type Unit = {
         mode: string
         score: number
         verdict: string
+        modelVerdict?: string
+        severity?: 'none' | 'low' | 'medium' | 'high'
+        evidenceComplete?: boolean
         risks: string[]
         unsupportedClaims: string[]
         suspiciousSentences?: Array<{
@@ -275,6 +278,8 @@ export type Unit = {
           sentence: string
           reason: string
           sourceParagraphs: string[]
+          severity?: 'low' | 'medium' | 'high'
+          evidenceMatch?: boolean
         }>
         missingImportantIdeas: string[]
         error?: string

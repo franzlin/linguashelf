@@ -5,7 +5,20 @@
 // the paragraph-to-source map they produce is what the study page shows as
 // provenance.
 import { callTextAi, textAiConfigured } from './ai-runtime.js'
-import { extractKeywords, normalizeText, splitSentences, takeWords, wordCount } from './text.js'
+import { extractKeywords, normalizeKeyword, normalizeText, splitSentences, takeWords, wordCount } from './text.js'
+
+const fidelitySourceWordLimit = 2600
+const auditVerdicts = new Set(['pass', 'review', 'fail'])
+const auditSeverities = new Set(['none', 'low', 'medium', 'high'])
+
+function keywordRootSet(text, limit = 24) {
+  return new Set(extractKeywords(text, limit).map(normalizeKeyword).filter(Boolean))
+}
+
+function textContainsKeyword(text, keyword) {
+  const target = normalizeKeyword(keyword)
+  return Boolean(target) && keywordRootSet(text, 120).has(target)
+}
 
 export function contentMetrics(content) {
   const readingParagraphs = content?.reading?.paragraphs || []
@@ -42,32 +55,34 @@ export function sourceParagraphs(unit) {
       text,
       wordCount: wordCount(text),
       keywords: new Set(extractKeywords(text, 18)),
+      keywordRoots: keywordRootSet(text, 18),
     }))
 }
 
 export function keywordOverlapScore(readingText, sourceItem) {
-  const readingKeywords = new Set(extractKeywords(readingText, 24))
-  if (!readingKeywords.size || !sourceItem?.keywords?.size) return 0
+  const readingKeywords = keywordRootSet(readingText, 24)
+  const sourceKeywords = sourceItem?.keywordRoots || new Set([...(sourceItem?.keywords || [])].map(normalizeKeyword))
+  if (!readingKeywords.size || !sourceKeywords.size) return 0
   let overlap = 0
   for (const keyword of readingKeywords) {
-    if (sourceItem.keywords.has(keyword)) overlap += 1
+    if (sourceKeywords.has(keyword)) overlap += 1
   }
-  return overlap / Math.max(4, Math.min(readingKeywords.size, sourceItem.keywords.size))
+  return overlap / Math.max(4, Math.min(readingKeywords.size, sourceKeywords.size))
 }
 
 export function matchedKeywordsForSource(readingText, sourceItem, limit = 10) {
-  const readingKeywords = new Set(extractKeywords(readingText, 24))
+  const readingKeywords = keywordRootSet(readingText, 24)
   if (!readingKeywords.size || !sourceItem?.keywords?.size) return []
   const matched = []
-  for (const keyword of readingKeywords) {
-    if (sourceItem.keywords.has(keyword)) matched.push(keyword)
+  for (const keyword of sourceItem.keywords) {
+    if (readingKeywords.has(normalizeKeyword(keyword))) matched.push(keyword)
   }
   return matched.slice(0, limit)
 }
 
 export function textKeywordSimilarity(a, b) {
-  const left = new Set(extractKeywords(a, 24))
-  const right = new Set(extractKeywords(b, 24))
+  const left = keywordRootSet(a, 24)
+  const right = keywordRootSet(b, 24)
   if (!left.size || !right.size) return 0
   let overlap = 0
   for (const word of left) {
@@ -96,6 +111,8 @@ export function normalizeSuspiciousSentence(item) {
     sentence,
     reason: String(item.reason || 'AI 审稿认为这句话可能缺少原文支持'),
     sourceParagraphs: Array.isArray(item.sourceParagraphs) ? item.sourceParagraphs.map(String) : [],
+    severity: auditSeverities.has(item.severity) ? item.severity : 'medium',
+    evidenceMatch: Boolean(item.evidenceMatch),
   }
 }
 
@@ -154,7 +171,8 @@ export function mapReadingToSource(content, unit) {
       .slice(0, 2)
     const confidence = ranked[0]?.score || 0
     const suspiciousSentences = suspiciousSentencesForParagraph(content, content?.qualityAudit, index)
-    const status = !ranked.length || confidence < 0.12 || suspiciousSentences.length ? 'review' : 'ok'
+    const matchedKeywordCount = ranked[0] ? matchedKeywordsForSource(paragraph.text || '', ranked[0].source).length : 0
+    const status = !ranked.length || (confidence < 0.08 && matchedKeywordCount < 2) || suspiciousSentences.length ? 'review' : 'ok'
     const output = {
       readingParagraph: index + 1,
       status,
@@ -184,8 +202,7 @@ export function mapReadingToSource(content, unit) {
 export function localFidelityAudit(content, unit) {
   const readingText = (content?.reading?.paragraphs || []).map((paragraph) => paragraph.text).join(' ')
   const sourceKeywords = unit ? extractKeywords(unit.sourceText, 16) : []
-  const readingLower = readingText.toLowerCase()
-  const coveredKeywords = sourceKeywords.filter((keyword) => readingLower.includes(keyword.toLowerCase()))
+  const coveredKeywords = sourceKeywords.filter((keyword) => textContainsKeyword(readingText, keyword))
   const missingImportantIdeas = sourceKeywords.filter((keyword) => !coveredKeywords.includes(keyword)).slice(0, 8)
   const score = sourceKeywords.length ? coveredKeywords.length / sourceKeywords.length : 1
   const sourceMap = unit ? mapReadingToSource(content, unit) : []
@@ -196,7 +213,9 @@ export function localFidelityAudit(content, unit) {
   return {
     mode: 'local',
     score: Number(score.toFixed(2)),
-    verdict: risks.length ? '需要复核来源忠实度' : '本地检查未发现明显忠实度问题',
+    verdict: risks.length ? 'review' : 'pass',
+    severity: risks.length ? 'low' : 'none',
+    evidenceComplete: false,
     risks,
     unsupportedClaims: [],
     suspiciousSentences: [],
@@ -213,8 +232,9 @@ export const fidelityAuditSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    score: { type: 'number' },
-    verdict: { type: 'string' },
+    score: { type: 'number', minimum: 0, maximum: 1 },
+    verdict: { type: 'string', enum: ['pass', 'review', 'fail'] },
+    severity: { type: 'string', enum: ['none', 'low', 'medium', 'high'] },
     risks: { type: 'array', items: { type: 'string' } },
     unsupportedClaims: { type: 'array', items: { type: 'string' } },
     suspiciousSentences: {
@@ -226,9 +246,10 @@ export const fidelityAuditSchema = {
           readingParagraph: { type: 'number' },
           sentence: { type: 'string' },
           reason: { type: 'string' },
+          severity: { type: 'string', enum: ['low', 'medium', 'high'] },
           sourceParagraphs: { type: 'array', items: { type: 'string' } },
         },
-        required: ['readingParagraph', 'sentence', 'reason', 'sourceParagraphs'],
+        required: ['readingParagraph', 'sentence', 'reason', 'severity', 'sourceParagraphs'],
       },
     },
     missingImportantIdeas: { type: 'array', items: { type: 'string' } },
@@ -246,7 +267,55 @@ export const fidelityAuditSchema = {
       },
     },
   },
-  required: ['score', 'verdict', 'risks', 'unsupportedClaims', 'suspiciousSentences', 'missingImportantIdeas', 'sourceAlignedParagraphs'],
+  required: ['score', 'verdict', 'severity', 'risks', 'unsupportedClaims', 'suspiciousSentences', 'missingImportantIdeas', 'sourceAlignedParagraphs'],
+}
+
+export function buildFidelityAuditSourceBlocks(unit, maxWords = fidelitySourceWordLimit, blockWords = 325) {
+  const sourceWords = takeWords(unit?.sourceText || '', maxWords).split(/\s+/).filter(Boolean)
+  const blocks = []
+  for (let index = 0; index < sourceWords.length; index += blockWords) {
+    blocks.push(`Source block ${blocks.length + 1}: ${sourceWords.slice(index, index + blockWords).join(' ')}`)
+  }
+  return blocks
+}
+
+function evidenceMatchedSentence(content, item) {
+  const normalized = normalizeSuspiciousSentence(item)
+  if (!normalized) return null
+  const paragraph = content?.reading?.paragraphs?.[normalized.readingParagraph - 1]
+  const sentence = normalizeClaimText(normalized.sentence)
+  const paragraphText = normalizeClaimText(paragraph?.text || '')
+  return {
+    ...normalized,
+    evidenceMatch: Boolean(sentence.length >= 12 && paragraphText.includes(sentence)),
+  }
+}
+
+export function normalizeAiFidelityAudit(parsed, content) {
+  const suspiciousSentences = (parsed?.suspiciousSentences || []).map((item) => evidenceMatchedSentence(content, item)).filter(Boolean)
+  const generatedText = normalizeClaimText((content?.reading?.paragraphs || []).map((paragraph) => paragraph.text).join(' '))
+  const unsupportedClaims = [...new Set((parsed?.unsupportedClaims || [])
+    .map((claim) => String(claim || '').trim())
+    .filter((claim) => normalizeClaimText(claim).length >= 12 && generatedText.includes(normalizeClaimText(claim))))]
+  const matchedFindings = suspiciousSentences.filter((item) => item.evidenceMatch)
+  const highConfidence = matchedFindings.filter((item) => item.severity === 'high')
+  const mediumConfidence = matchedFindings.filter((item) => item.severity === 'medium')
+  const score = Math.max(0, Math.min(1, Number(parsed?.score ?? 0)))
+  const verdict = highConfidence.length && score < 0.55 ? 'fail' : highConfidence.length || mediumConfidence.length || unsupportedClaims.length ? 'review' : 'pass'
+  const derivedSeverity = highConfidence.length ? 'high' : mediumConfidence.length || unsupportedClaims.length ? 'medium' : 'none'
+  const risks = [...new Set((parsed?.risks || []).map(String).filter(Boolean))]
+  if (score < 0.55 && verdict === 'pass') risks.push('AI 给出偏低分数，但没有定位到可核对的具体句子，因此未据此标记复核')
+  return {
+    ...parsed,
+    score: Number(score.toFixed(2)),
+    modelVerdict: auditVerdicts.has(parsed?.verdict) ? parsed.verdict : 'review',
+    verdict,
+    severity: derivedSeverity,
+    evidenceComplete: true,
+    suspiciousSentences,
+    unsupportedClaims,
+    risks,
+  }
 }
 
 export async function auditContentFidelity(content, unit) {
@@ -256,10 +325,7 @@ export async function auditContentFidelity(content, unit) {
 
   try {
     const readingText = (content?.reading?.paragraphs || []).map((paragraph, index) => `Paragraph ${index + 1}: ${paragraph.text}`).join('\n\n')
-    const sourceRefs = sourceParagraphs(unit)
-      .slice(0, 12)
-      .map((item) => `Source paragraph ${item.index + 1}: ${takeWords(item.text, 140)}`)
-      .join('\n\n')
+    const sourceRefs = buildFidelityAuditSourceBlocks(unit).join('\n\n')
     const parsed = await callTextAi(
       {
         instructions: 'You audit whether a graded English lesson stays faithful to its source. Do not rewrite the lesson. Return only schema-valid JSON.',
@@ -268,14 +334,17 @@ export async function auditContentFidelity(content, unit) {
         reasoningEffort: 'low',
         verbosity: 'low',
         input: `
-Compare the source excerpts and generated lesson.
+Compare the complete source excerpt used for generation and the generated lesson.
 
 Rules:
-- Score 1.0 means fully faithful; 0.0 means mostly unsupported.
-- List unsupported claims only if the lesson says something not supported by the source.
-- In suspiciousSentences, copy the exact generated sentence when a specific sentence is unsupported or weakly supported.
+- You have the complete source evidence used to generate this lesson; review every source block before deciding.
+- Score 1.0 means fully faithful; 0.0 means mostly unsupported. Do not lower the score merely because wording was simplified.
+- verdict must be pass when there is no concrete unsupported sentence, review only for specific weak support, and fail only for directly contradicted or unsupported claims.
+- List unsupported claims only if the lesson says something not supported anywhere in the supplied source blocks.
+- In suspiciousSentences, copy the exact generated sentence, its reading paragraph number, severity, and the closest source block labels.
+- Treat faithful paraphrases, simpler wording, omitted minor details, and normal grammatical changes as supported.
 - List important missing ideas only if they are central to the source excerpt.
-- Map each generated reading paragraph to the best matching source paragraph labels when possible.
+- Map each generated reading paragraph to the best matching source block labels when possible.
 
 Source:
 ${sourceRefs}
@@ -286,13 +355,14 @@ ${readingText}
       },
       'AI 审稿',
     )
+    const normalizedAudit = normalizeAiFidelityAudit(parsed, content)
     return {
       ...local,
-      ...parsed,
+      ...normalizedAudit,
       mode: 'ai',
       localScore: local.score,
-      risks: [...new Set([...(local.risks || []), ...(parsed.risks || [])])],
-      missingImportantIdeas: [...new Set([...(local.missingImportantIdeas || []), ...(parsed.missingImportantIdeas || [])])].slice(0, 12),
+      risks: [...new Set([...(local.risks || []), ...(normalizedAudit.risks || [])])],
+      missingImportantIdeas: [...new Set([...(local.missingImportantIdeas || []), ...(normalizedAudit.missingImportantIdeas || [])])].slice(0, 12),
     }
   } catch (error) {
     return {
@@ -314,8 +384,7 @@ export function assessContentQuality(content, unit = null) {
   const audit = content?.qualityAudit || (unit ? localFidelityAudit(content, unit) : null)
   const sourceMap = unit ? mapReadingToSource(content, unit) : []
   const sourceKeywords = unit ? extractKeywords(unit.sourceText, 12) : []
-  const readingLower = readingText.toLowerCase()
-  const coveredKeywords = sourceKeywords.filter((keyword) => readingLower.includes(keyword.toLowerCase()))
+  const coveredKeywords = sourceKeywords.filter((keyword) => textContainsKeyword(readingText, keyword))
   const keywordCoverage = sourceKeywords.length ? coveredKeywords.length / sourceKeywords.length : 1
 
   if (readingWords < 650) warnings.push('阅读正文偏短')
@@ -325,9 +394,9 @@ export function assessContentQuality(content, unit = null) {
   if (questionCount < 4) warnings.push('理解题偏少')
   if (keywordCoverage < 0.35) warnings.push('原文关键词覆盖偏低')
   if (!String(content?.fidelityNote || '').toLowerCase().includes('source')) warnings.push('忠实度说明不足')
-  if (audit?.score !== undefined && Number(audit.score) < 0.55) warnings.push('AI 忠实度审稿分数偏低')
+  if (fidelityAuditNeedsReview(audit)) warnings.push('忠实度审稿发现需要核对的具体问题')
   if (audit?.unsupportedClaims?.length) warnings.push('AI 审稿发现疑似未受原文支持的表述')
-  if (sourceMap.some((item) => !item.sourceRefs.length)) warnings.push('部分段落缺少明确来源映射')
+  if (sourceMap.some((item) => item.status === 'review')) warnings.push('部分段落的来源映射需要核对')
 
   return {
     readingWords,
@@ -350,11 +419,20 @@ export function assessContentQuality(content, unit = null) {
 
 export function isLowFidelityQuality(quality) {
   const audit = quality?.fidelity?.audit
-  const score = audit?.score === undefined ? 1 : Number(audit.score)
-  const unsupportedCount = (audit?.unsupportedClaims || []).length
-  const suspiciousCount = (audit?.suspiciousSentences || []).length
-  const unmappedCount = (quality?.sourceMap || []).filter((item) => !item.sourceRefs?.length).length
-  return score < 0.6 || unsupportedCount > 0 || suspiciousCount > 1 || unmappedCount > 1
+  if (audit?.mode !== 'ai' || audit?.evidenceComplete !== true || audit?.verdict !== 'fail') return false
+  const exactHighSeverityFindings = (audit?.suspiciousSentences || []).filter((item) => item.evidenceMatch && item.severity === 'high')
+  return Number(audit.score) < 0.55 && exactHighSeverityFindings.length > 0
+}
+
+export function fidelityAuditNeedsReview(audit) {
+  if (!audit) return false
+  if (auditVerdicts.has(audit.verdict)) return audit.verdict !== 'pass'
+  return Number(audit.score ?? 1) < 0.55 || Boolean(audit.unsupportedClaims?.length)
+}
+
+export function hasRetryableContentQualityIssues(quality) {
+  const retryableWarnings = new Set(['阅读正文偏短', '阅读正文偏长', '段落数偏离目标', '听力预热长度需要调整', '理解题偏少'])
+  return (quality?.warnings || []).some((warning) => retryableWarnings.has(warning))
 }
 
 export function fidelityRepairNotesFromQuality(quality) {

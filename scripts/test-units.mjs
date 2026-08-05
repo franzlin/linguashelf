@@ -10,12 +10,22 @@
 // Run with: node scripts/test-units.mjs
 import assert from 'node:assert/strict'
 import { planUnits, splitIntoSourceUnits, isStudyChapter, mergeShortSourceParts } from '../server/units.js'
-import { localFidelityAudit, mapReadingToSource, assessContentQuality } from '../server/quality.js'
+import {
+  assessContentQuality,
+  buildFidelityAuditSourceBlocks,
+  hasRetryableContentQualityIssues,
+  isLowFidelityQuality,
+  localFidelityAudit,
+  mapReadingToSource,
+  normalizeAiFidelityAudit,
+} from '../server/quality.js'
 import { cleanPdfPages, isPdfProductionArtifactLine, isLikelyPageNumber, formatPdfPageRange } from '../server/pdf-text.js'
 import { diagnoseJobError, canAutoRetryJob } from '../server/job-diagnosis.js'
 import { normalizeLevel, shiftLevel, readingLevels, listeningLevels } from '../server/levels.js'
-import { wordCount, extractKeywords } from '../server/text.js'
+import { wordCount, extractKeywords, normalizeKeyword } from '../server/text.js'
 import { normalizeUnitContent } from '../server/content-compat.js'
+import { gradedReadingLessonSchema, normalizeGeneratedLesson } from '../server/content.js'
+import { assertJsonSchema } from '../server/json-schema.js'
 import { publicUnit } from '../server/progress.js'
 
 let passed = 0
@@ -186,6 +196,90 @@ test('quality assessment reports word and paragraph metrics', () => {
   )
   assert.ok(quality && typeof quality === 'object')
   assert.ok('fidelity' in quality || 'metrics' in quality || 'checks' in quality, Object.keys(quality).join(','))
+})
+
+test('legacy AI lesson fields are normalized before fidelity scoring', () => {
+  const normalized = normalizeGeneratedLesson({
+    lessonTitle: 'Public finance',
+    listeningText: 'Parliament and merchants changed public finance through taxation and credit.',
+    readingText: [
+      'Parliament debated sovereignty and taxation throughout the decade.',
+      'Merchants financed the war through credit markets in Amsterdam and London.',
+      'Ministers raised excise duties on salt, beer, and imported textiles.',
+      'Local magistrates resisted central authority over revenue collection and patronage.',
+      'These political arguments connected taxation, commerce, credit, and authority.',
+    ],
+    comprehensionQuestions: [{ question: 'What financed the war?', answer: 'Credit markets.' }],
+  }, { id: 'legacy-audit', title: 'Public finance', sourceLocation: 'Chapter 1' })
+  assert.equal(normalized.reading.paragraphs.length, 5)
+  assert.equal(normalized.listening.text.startsWith('Parliament'), true)
+  assert.ok(localFidelityAudit(normalized, sourceUnit).score > 0.6)
+  assert.doesNotThrow(() => assertJsonSchema(normalized, gradedReadingLessonSchema))
+})
+
+test('schema validation rejects parseable but structurally empty lessons', () => {
+  const normalized = normalizeGeneratedLesson({ unexpected: 'valid JSON but not a lesson' }, { id: 'bad-ai', title: 'Bad result' })
+  assert.throws(() => assertJsonSchema(normalized, gradedReadingLessonSchema), /至少需要 1 项|长度不能小于 1/)
+})
+
+test('fidelity audit source includes the full 2600-word generation excerpt', () => {
+  const words = Array.from({ length: 3000 }, (_, index) => (index === 2400 ? 'tail-evidence-marker' : `evidence${index}`))
+  const blocks = buildFidelityAuditSourceBlocks({ sourceText: words.join(' ') })
+  assert.ok(blocks.length > 1)
+  assert.ok(blocks.join(' ').includes('tail-evidence-marker'), 'late source evidence was truncated from the audit')
+  assert.equal(wordCount(blocks.join(' ').replace(/Source block \d+:/g, '')), 2600)
+})
+
+test('an unlocated low AI score does not become a review verdict', () => {
+  const content = contentFrom(['Parliament debated sovereignty and taxation throughout the decade.'])
+  const audit = normalizeAiFidelityAudit({
+    score: 0.12,
+    verdict: 'review',
+    severity: 'high',
+    risks: ['The wording may be unsupported.'],
+    unsupportedClaims: ['A sentence that does not appear in the generated lesson.'],
+    suspiciousSentences: [],
+    missingImportantIdeas: [],
+    sourceAlignedParagraphs: [],
+  }, content)
+  assert.equal(audit.verdict, 'pass')
+  assert.equal(audit.unsupportedClaims.length, 0)
+})
+
+test('only exact high-severity findings trigger strict fidelity regeneration', () => {
+  const sentence = 'The author says the ministry invented a new tax without parliamentary approval.'
+  const content = contentFrom([sentence])
+  const audit = normalizeAiFidelityAudit({
+    score: 0.3,
+    verdict: 'fail',
+    severity: 'high',
+    risks: ['A concrete unsupported claim is present.'],
+    unsupportedClaims: [sentence],
+    suspiciousSentences: [{ readingParagraph: 1, sentence, reason: 'No source block supports this claim.', severity: 'high', sourceParagraphs: [] }],
+    missingImportantIdeas: [],
+    sourceAlignedParagraphs: [],
+  }, content)
+  audit.mode = 'ai'
+  assert.equal(audit.verdict, 'fail')
+  assert.equal(audit.suspiciousSentences[0].evidenceMatch, true)
+  assert.equal(isLowFidelityQuality({ fidelity: { audit }, sourceMap: [] }), true)
+  assert.equal(isLowFidelityQuality({ fidelity: { audit: { ...audit, evidenceComplete: false } }, sourceMap: [] }), false)
+})
+
+test('soft provenance warnings do not trigger full content regeneration', () => {
+  assert.equal(hasRetryableContentQualityIssues({ warnings: ['部分段落的来源映射需要核对'] }), false)
+  assert.equal(hasRetryableContentQualityIssues({ warnings: ['段落数偏离目标'] }), true)
+})
+
+test('provenance matching recognizes common word inflections', () => {
+  assert.equal(normalizeKeyword('strategies'), normalizeKeyword('strategy'))
+  const unit = {
+    id: 'inflection-source',
+    sourceLocation: 'Chapter 2',
+    sourceText: `${paragraph('strategy source')} Ministers developed several strategies for collecting revenues and financing armies.`,
+  }
+  const map = mapReadingToSource(contentFrom(['The ministry used a strategy to collect revenue and finance the army.']), unit)
+  assert.ok(map[0].sourceRefs.length > 0)
 })
 
 console.log('\n· PDF cleaning')

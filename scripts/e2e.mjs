@@ -940,7 +940,6 @@ try {
     await page.request.get(`${baseUrl}/api/app`, { headers: { Authorization: `Bearer ${token}` } })
   ).json()
   const libraryLayoutBook = libraryAppPayload.books.find((book) => book.title === 'E2E History Reader')
-  insertLegacyGeneratedLesson(libraryLayoutBook.id)
   const mojibakeBookTitle = 'Ottoman expansion and military power, 1300â\u0080\u00931453 -- Illustrated edition -- 9780465008506 -- 22f15bb1a2194c34bd06ba3c0fdaf0dc -- Annaâ\u0080\u0099s Archive'
   const displayBookTitle = 'Ottoman expansion and military power, 1300–1453'
   const renameForLayoutResponse = await page.request.patch(`${baseUrl}/api/books/${libraryLayoutBook.id}`, {
@@ -1111,6 +1110,7 @@ try {
 
   await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
   await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
+  await page.locator('.detail-head h1').filter({ hasText: 'E2E History Reader' }).waitFor()
   await page.getByRole('heading', { name: '学习单元' }).waitFor()
   const oldBookPodcast = {
     id: 'e2e-old-book-podcast',
@@ -1219,8 +1219,16 @@ try {
   await page.unroute(`**/api/jobs/${retryPodcastJob.id}`)
   await page.unroute(`**/api/jobs/${oldBookPodcastJob.id}`)
 
+  // Seed the direct-SQL compatibility fixture immediately before reading it.
+  // Earlier background writes intentionally use independent snapshots and can
+  // otherwise race with a fixture inserted much earlier in this long scenario.
+  insertLegacyGeneratedLesson(firstRaceBook.id)
   await page.getByLabel('主导航').getByRole('button', { name: '书库' }).click()
+  const historyBookDetailResponse = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/books/${firstRaceBook.id}`) && response.request().method() === 'GET'
+  )
   await page.locator('.book-card').filter({ hasText: 'E2E History Reader' }).getByRole('button', { name: '打开' }).click()
+  await historyBookDetailResponse
   await page.getByRole('heading', { name: '学习单元' }).waitFor()
 
   if (!(await page.getByRole('heading', { name: '学习单元' }).count())) {
@@ -1228,7 +1236,10 @@ try {
     await page.getByRole('heading', { name: '学习单元' }).waitFor()
   }
   const legacyLessonRow = page.locator('.unit-row').filter({ hasText: 'Legacy generated lesson' })
-  if ((await legacyLessonRow.count()) !== 1) throw new Error('Legacy generated lesson was not listed exactly once')
+  const legacyLessonCount = await legacyLessonRow.count()
+  if (legacyLessonCount !== 1) {
+    throw new Error(`Legacy generated lesson was listed ${legacyLessonCount} times; rows: ${JSON.stringify(await page.locator('.unit-row').allTextContents())}`)
+  }
   await legacyLessonRow.getByRole('button', { name: '学习' }).click()
   await page.getByRole('heading', { name: 'Legacy generated lesson' }).waitFor()
   await page.getByRole('heading', { name: '分级阅读' }).waitFor()

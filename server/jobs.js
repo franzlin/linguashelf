@@ -15,7 +15,7 @@ import {
   podcastLexileDefault,
 } from './config.js'
 import { readDb, writeDb } from './storage.js'
-import { assessContentQuality, fidelityRepairNotesFromQuality, isLowFidelityQuality } from './quality.js'
+import { assessContentQuality, fidelityRepairNotesFromQuality, hasRetryableContentQualityIssues, isLowFidelityQuality } from './quality.js'
 import { podcastGeminiFallbackConfig, podcastGeminiOfficialConfig, podcastQwenConfig } from './ai-runtime.js'
 import { estimateTextTokens, takeWords, wordCount } from './text.js'
 import { groupPdfPages, parsePdf, withUploadParseSlot } from './pdf.js'
@@ -781,7 +781,7 @@ export async function processJobQueue() {
         await writeDb(db)
         continue
       }
-      if (quality.status === 'review' && Number(job.retryCount || 0) < maxAutoRegenAttempts) {
+      if (hasRetryableContentQualityIssues(quality) && Number(job.retryCount || 0) < maxAutoRegenAttempts) {
         job.status = 'queued'
         job.progress = 0
         job.retryCount = Number(job.retryCount || 0) + 1

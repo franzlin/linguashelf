@@ -10,6 +10,7 @@ import { callTextAi, textAiConfigured } from './ai-runtime.js'
 import { extractKeywords, normalizeText, splitSentences, takeWords, titleCase, wordCount } from './text.js'
 import { levelIndex, listeningLevels, normalizeLevel, readingLevels } from './levels.js'
 import { assessContentQuality, auditContentFidelity, exampleSentenceForTerm } from './quality.js'
+import { normalizeUnitContent } from './content-compat.js'
 
 export function makeFallbackContent(unit, settings) {
   const sentences = splitSentences(unit.sourceText)
@@ -196,6 +197,7 @@ ${source}
     input: prompt,
     schema: gradedReadingLessonSchema,
     schemaName: 'graded_reading_lesson',
+    normalizeResponse: (value) => normalizeGeneratedLesson(value, unit),
   })
   parsed.generationMode = 'ai'
   parsed.questions = (parsed.questions || []).map((question) => ({
@@ -203,6 +205,35 @@ ${source}
     id: question.id || nanoid(),
   }))
   return parsed
+}
+
+export function normalizeGeneratedLesson(content, unit = {}) {
+  const normalized = normalizeUnitContent(content, unit)
+  if (!normalized) return null
+  return {
+    title: normalized.title,
+    level: normalized.level,
+    sourceLocation: normalized.sourceLocation,
+    background: normalized.background,
+    concepts: (normalized.concepts || []).map(({ term, simpleEnglish, chinese }) => ({ term, simpleEnglish, chinese })),
+    listening: {
+      text: normalized.listening?.text || '',
+      transcriptHiddenByDefault: normalized.listening?.transcriptHiddenByDefault !== false,
+    },
+    reading: {
+      paragraphs: (normalized.reading?.paragraphs || []).map(({ text, summaryZh }) => ({ text, summaryZh })),
+    },
+    vocabulary: (normalized.vocabulary || []).map(({ term, meaningZh, simpleEnglish }) => ({ term, meaningZh, simpleEnglish })),
+    questions: (normalized.questions || []).map(({ id, prompt, options, answerIndex, explanationZh }) => ({
+      id,
+      prompt,
+      options,
+      answerIndex,
+      explanationZh,
+    })),
+    generationMode: normalized.generationMode,
+    fidelityNote: normalized.fidelityNote,
+  }
 }
 
 export function buildStrictFidelityPrompt(unit, settings = {}) {
@@ -241,7 +272,7 @@ export const gradedReadingLessonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
+    title: { type: 'string', minLength: 1 },
     level: {
       type: 'object',
       additionalProperties: false,
@@ -270,7 +301,7 @@ export const gradedReadingLessonSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        text: { type: 'string' },
+        text: { type: 'string', minLength: 1 },
         transcriptHiddenByDefault: { type: 'boolean' },
       },
       required: ['text', 'transcriptHiddenByDefault'],
@@ -281,6 +312,7 @@ export const gradedReadingLessonSchema = {
       properties: {
         paragraphs: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -309,6 +341,7 @@ export const gradedReadingLessonSchema = {
     },
     questions: {
       type: 'array',
+      minItems: 1,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -421,6 +454,7 @@ export async function buildGeneratedContent(unit, generationSettings) {
     aiError = error.message
   }
   if (!content) content = makeFallbackContent(unit, generationSettings)
+  content = normalizeGeneratedLesson(content, unit)
   content.qualityAudit = await auditContentFidelity(content, unit)
   if (aiError) content.fidelityNote = `${content.fidelityNote || ''} AI 调用失败，已使用本地演示生成器。${aiError}`.trim()
   return content
