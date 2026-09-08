@@ -453,6 +453,10 @@ export async function buildGeneratedContent(unit, generationSettings) {
   } catch (error) {
     aiError = error.message
   }
+  const allowLocalFallback = (process.env.ALLOW_LOCAL_FALLBACK ?? 'true') !== 'false'
+  if (!content && !allowLocalFallback) {
+    throw new Error(`AI 文本生成失败，本地演示兜底已按配置禁用（ALLOW_LOCAL_FALLBACK=false）。原始错误: ${aiError}`)
+  }
   if (!content) content = makeFallbackContent(unit, generationSettings)
   content = normalizeGeneratedLesson(content, unit)
   content.qualityAudit = await auditContentFidelity(content, unit)

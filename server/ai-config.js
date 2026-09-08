@@ -461,6 +461,7 @@ export async function requestTextAi(config, request, deps) {
         const url = apiStyle === 'responses' ? `${config.baseUrl}/responses` : `${config.baseUrl}/chat/completions`
         const body = apiStyle === 'responses' ? buildResponsesBody(shared) : buildChatBody(shared)
 
+        try {
         const response = await fetchImpl(url, {
           method: 'POST',
           headers: {
@@ -494,6 +495,17 @@ export async function requestTextAi(config, request, deps) {
           break
         }
         throw lastError
+        } catch (e) {
+          // Transport/parse-level failure or unexpected status: record it and try the
+          // next combination (other dialect / looser json / fewer extras) instead of
+          // dying right away. The last error surfaces only after every combo is exhausted.
+          lastError = e instanceof Error ? e : new Error(String(e))
+          // Auth failures must surface immediately: probing other dialects would just
+          // waste time and hide the real cause.
+
+          if (lastError.status === 401 || lastError.status === 403) throw lastError
+          continue
+        }
       }
 
       if (styleUnsupported) break
