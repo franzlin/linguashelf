@@ -37,3 +37,10 @@ scripts/model-candidates.json
 *.sw?
 
 .codex-tools/
+
+# Local agent tooling state
+.agents/
+.codex/
+
+# Temp transfer directory（不属于项目提交）
+_to_delete/
